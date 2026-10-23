@@ -1,0 +1,57 @@
+# Embedded metadata reader
+
+Lap supplements its existing EXIF, LibRaw and video readers with the pinned
+`exiftool-rs 0.13.0` Rust library. No Perl or external ExifTool process is bundled.
+This implementation is read-only; it never writes media or sidecars.
+
+## Import policy
+
+- Existing technical fields win. Deep extraction fills missing camera, lens,
+  original capture date and complete latitude/longitude pairs before geocoding.
+- Automatic organization metadata import uses the existing XMP import setting.
+  Ratings, reject ratings, keywords and descriptions may now come from embedded
+  XMP/IPTC/EXIF. Sidecar properties take precedence, including explicit empties.
+- The existing non-destructive import mode and dirty bits protect local edits
+  and clears. This is fill-empty/merge behavior, not bidirectional synchronization.
+- Manual **Import XMP Metadata** continues to read only the matching sidecar.
+- Media and sidecar timestamps/sizes are recorded together. Unchanged scans skip
+  organization extraction; an upgrade backfills embedded organization metadata
+  once. Technical-field backfills require a file-info refresh/rescan that actually
+  re-extracts file info, not just an unchanged folder scan.
+- A per-thread, single-file mapped-value cache avoids the duplicate extraction
+  between file-info construction and organization import. Cloud-only files are
+  not hydrated by this backend. Unsupported formats fall back to existing readers.
+- Unknown fields are not persisted. Hierarchical keyword strings use the existing
+  flat tag model. No new hierarchy or full metadata inspector is promised here.
+
+## Known limits and upstream cooperation
+
+ORF IIRO headers fail in the pinned upstream version. Existing EXIF/LibRaw paths
+remain available. A 26-byte synthetic reproducer was independently checked with
+original ExifTool 13.55 and reported upstream:
+https://github.com/Le-Syl21/exiftool-rs/issues/24
+
+Local comparisons also found missing video GPS and some lens fields. Existing
+values must not be replaced by these missing values. GPS altitude remains with
+the established reader pending verified sign/reference handling. Numeric XP tag
+display strings must never become keywords; XPKeywords is decoded as UTF-16LE.
+Synthetic MakerNote zero ratings are ignored. Source groups are retained during
+mapping to avoid name-only duplicate selection for ratings and organization fields.
+
+## Validation
+
+`python3 scripts/test_metadata_reader.py` compiles the actual reader and XMP
+modules in an isolated harness and runs parsing fixtures plus in-memory SQLite
+regressions. The filesystem cloud-state check and global DB opener are stubbed;
+the full file scanner and UI are not covered by this harness.
+
+`cargo check --locked --offline --manifest-path src-tauri/Cargo.toml` validates
+the complete application on the host platform. Windows/Linux builds and installer
+execution still require the normal platform CI; host checks do not prove them.
+
+Tests cover embedded JPEG XMP, comma-containing keywords, numeric garbage,
+coordinate bounds/signs, unsupported formats, sidecar priority and protection of
+local clears, alongside the existing sidecar suite.
+
+The library is GPL-3.0-or-later, matching Lap. Release source archives must include
+the pinned dependency and its notices in addition to Lap's build sources.

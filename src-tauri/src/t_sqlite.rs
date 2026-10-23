@@ -2647,6 +2647,27 @@ impl AFile {
                 .or(file_info.modified);
         }
 
+        // Deep metadata supplements missing fields without replacing values
+        // already supplied by EXIF, video probing, or LibRaw.
+        if matches!(file_type, 1 | 2 | 3) {
+            let deep = crate::t_metadata::read(Path::new(file_path));
+            e_make = e_make.or(deep.make);
+            e_model = e_model.or(deep.model);
+            e_lens_make = e_lens_make.or(deep.lens_make);
+            e_lens_model = e_lens_model.or(deep.lens_model);
+            if e_lens_make.is_none() {
+                e_lens_make = e_lens_model.as_deref().and_then(t_lens::infer_lens_make).map(str::to_owned);
+            }
+            e_date_time = e_date_time.or(deep.date);
+            taken_date = Self::capture_date_with_fallback(
+                taken_date, file_info.modified, e_date_time.as_deref());
+            if gps_latitude.is_none() && gps_longitude.is_none() {
+                gps_latitude = deep.latitude;
+                gps_longitude = deep.longitude;
+            }
+            gps_altitude = gps_altitude.or(deep.altitude);
+        }
+
         // Geocoding based on GPS coordinates from any source
         let (geo_name, geo_admin1, geo_admin2, geo_cc) =
             if let (Some(lat), Some(lon)) = (gps_latitude, gps_longitude) {

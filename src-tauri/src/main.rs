@@ -28,6 +28,7 @@ mod t_face;
 mod t_heif;
 mod t_http;
 mod t_image;
+mod t_metadata;
 mod t_jpeg;
 mod t_jxl;
 mod t_lens;

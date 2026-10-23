@@ -291,16 +291,25 @@ pub fn import_xmp_for_file_with_conn(
     conn: &Connection,
     mode: XmpImportMode,
 ) -> Result<bool, String> {
-    let Some(sidecar_path) = find_xmp_sidecar(Path::new(file_path)) else {
+    let sidecar_path = find_xmp_sidecar(Path::new(file_path));
+    // The media fingerprint also backfills embedded metadata on existing files
+    // once, without repeating deep parsing on every unchanged folder scan.
+    let media_info = fs::metadata(file_path).ok();
+    if media_info.is_none() && sidecar_path.is_none() {
         return Ok(false);
-    };
-
-    let info = fs::metadata(&sidecar_path).map_err(|e| e.to_string())?;
+    }
+    let sidecar_info = sidecar_path
+        .as_ref()
+        .map(fs::metadata)
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let fingerprint = format!(
-        "{}:{:?}:{}",
-        sidecar_path.display(),
-        info.modified().ok(),
-        info.len()
+        "embedded-v1:{}:{:?}:{}:{:?}:{:?}",
+        file_path,
+        media_info.as_ref().and_then(|info| info.modified().ok()),
+        media_info.map(|info| info.len()).unwrap_or(0),
+        sidecar_path,
+        sidecar_info.map(|info| (info.modified().ok(), info.len()))
     );
     if mode != XmpImportMode::ManualOverwrite {
         let previous: Option<String> = conn
@@ -315,7 +324,24 @@ pub fn import_xmp_for_file_with_conn(
             return Ok(false);
         }
     }
-    let meta = read_xmp_file(&sidecar_path)?;
+    // A manual 'Import from XMP' remains a sidecar-only operation. Automatic
+    // imports read embedded metadata, then let explicit sidecar fields win.
+    let meta = if mode == XmpImportMode::ManualOverwrite {
+        let Some(path) = sidecar_path else {
+            return Ok(false);
+        };
+        read_xmp_file(&path)?
+    } else {
+        let mut embedded = crate::t_metadata::read(Path::new(file_path)).organization;
+        if let Some(path) = sidecar_path {
+            let sidecar = read_xmp_file(&path)?;
+            embedded.rating = sidecar.rating.or(embedded.rating);
+            embedded.culling_flag = sidecar.culling_flag.or(embedded.culling_flag);
+            embedded.tags = sidecar.tags.or(embedded.tags);
+            embedded.description = sidecar.description.or(embedded.description);
+        }
+        embedded
+    };
     apply_with_state(file_id, &meta, conn, mode, Some(&fingerprint))
 }
 
@@ -743,6 +769,43 @@ mod tests {
         .unwrap();
         initialize(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn embedded_import_sidecar_priority_and_local_clear() {
+        let conn = setup_in_memory_db();
+        file(&conn);
+        let dir = create_temp_test_dir("embedded");
+        let image = dir.join("photo.jpg");
+        fs::write(&image, crate::t_metadata::tests::jpeg_with_xmp()).unwrap();
+        let path = image.to_str().unwrap();
+        import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::InitialScan).unwrap();
+        let rating = || {
+            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |r| {
+                r.get::<_, i32>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(rating(), 4);
+        let tags: i64 = conn
+            .query_row("SELECT COUNT(*) FROM afile_tags WHERE file_id=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(tags, 2);
+        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:xmp="{NS_XMP}"><rdf:RDF><rdf:Description xmp:Rating="5"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
+        import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::InitialScan).unwrap();
+        assert_eq!(rating(), 5);
+        // Local clears remain protected when a sidecar appears later.
+        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+            .unwrap();
+        fs::write(dir.join("photo.jpg.xmp"), format!(r#"<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="{NS_RDF}" xmlns:xmp="{NS_XMP}"><rdf:RDF><rdf:Description xmp:Rating="5"/></rdf:RDF></x:xmpmeta>"#)).unwrap();
+        import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::RescanNonDestructive).unwrap();
+        assert_eq!(rating(), 0);
+        // Manual import is explicitly sidecar-only and may overwrite a clear.
+        import_xmp_for_file_with_conn(1, path, &conn, XmpImportMode::ManualOverwrite).unwrap();
+        assert_eq!(rating(), 5);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
