@@ -22,7 +22,7 @@ edition = "2024"
 quick-xml = "0.37.5"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-exiftool-rs = "=0.13.0"
+exiftool-rs = "=0.14.0"
 ''')
     shutil.copyfile(root / "src-tauri/Cargo.lock", work / "Cargo.lock")
     modules = '\n'.join(

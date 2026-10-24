@@ -288,13 +288,26 @@ pub(crate) mod tests {
 
     #[test]
     fn unsupported_format_is_nonfatal() {
-        let path = std::env::temp_dir().join(format!("lap-unsupported-{}.orf", std::process::id()));
-        std::fs::write(&path, b"IIRO\x08\0\0\0\0\0\0\0\0\0").unwrap();
+        let path = std::env::temp_dir().join(format!("lap-unsupported-{}.bin", std::process::id()));
+        std::fs::write(&path, b"not a supported media container").unwrap();
         assert_eq!(
             read(&path).organization,
             crate::t_xmp::XmpMetadata::default()
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reads_orf_camera_make() {
+        // Regression for upstream #24: ORF uses 0x4f52 instead of TIFF's 42.
+        let data = [
+            b'I', b'I', 0x52, 0x4f, 8, 0, 0, 0, 1, 0, 0x0f, 1, 2, 0, 4, 0, 0, 0, b'O', b'M', 0, 0,
+            0, 0, 0, 0,
+        ];
+        let tags = ExifTool::new()
+            .extract_info_from_bytes(&data, Path::new("synthetic.orf"))
+            .unwrap();
+        assert_eq!(from_tags(&tags).make.as_deref(), Some("OM"));
     }
 
     #[test]

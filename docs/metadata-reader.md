@@ -1,7 +1,7 @@
 # Embedded metadata reader
 
 Lap supplements its existing EXIF, LibRaw and video readers with the pinned
-`exiftool-rs 0.13.0` Rust library. No Perl or external ExifTool process is bundled.
+`exiftool-rs 0.14.0` Rust library. No Perl or external ExifTool process is bundled.
 This implementation is read-only; it never writes media or sidecars.
 
 ## Import policy
@@ -26,9 +26,9 @@ This implementation is read-only; it never writes media or sidecars.
 
 ## Known limits and upstream cooperation
 
-ORF IIRO headers fail in the pinned upstream version. Existing EXIF/LibRaw paths
-remain available. A 26-byte synthetic reproducer was independently checked with
-original ExifTool 13.55 and reported upstream:
+ORF IIRO header support is fixed in the pinned 0.14.0 version and covered by a
+26-byte synthetic camera-make regression. All 45 formerly failing local ORF
+samples read successfully in the 0.14.0 comparison. Original upstream report:
 https://github.com/Le-Syl21/exiftool-rs/issues/24
 
 Local comparisons also found missing video GPS and some lens fields. Existing
@@ -37,6 +37,12 @@ the established reader pending verified sign/reference handling. Numeric XP tag
 display strings must never become keywords; XPKeywords is decoded as UTF-16LE.
 Synthetic MakerNote zero ratings are ignored. Source groups are retained during
 mapping to avoid name-only duplicate selection for ratings and organization fields.
+
+Remaining verified upstream issues in 0.14.0:
+- XMP numeric GPS normalization: https://github.com/Le-Syl21/exiftool-rs/issues/25
+- QuickTime GPS composites: https://github.com/Le-Syl21/exiftool-rs/issues/26
+- XPKeywords text decoding: https://github.com/Le-Syl21/exiftool-rs/issues/27
+- Samsung lens field mapping: https://github.com/Le-Syl21/exiftool-rs/issues/28
 
 ## Validation
 

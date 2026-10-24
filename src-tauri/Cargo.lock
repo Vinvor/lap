@@ -1504,9 +1504,9 @@ checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 
 [[package]]
 name = "exiftool-rs"
-version = "0.13.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb01b29f48f77bb6c2ab5e31e5f42f9ce3ffb15cd19cada0ba7291156532ef50"
+checksum = "368c0170fdf60c6f811c2d371adbdaa26441c32727b28c7d2ebd85b976edbef1"
 dependencies = [
  "brotli 9.0.0",
  "byteorder",

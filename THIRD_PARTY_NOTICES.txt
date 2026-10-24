@@ -22,7 +22,7 @@ Some copyright notices refer to shared full license terms later in this file.
 
 DIRECT DEPENDENCIES
 
-exiftool-rs 0.13.0 (Rust; GPL-3.0-or-later)
+exiftool-rs 0.14.0 (Rust; GPL-3.0-or-later)
 https://github.com/Le-Syl21/exiftool-rs
 Author: Sylvain (Le-Syl21). Based on ExifTool by Phil Harvey;
 tag tables and print conversions generated from the ExifTool Perl source.
