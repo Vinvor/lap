@@ -163,7 +163,7 @@
         "extension": "副檔名",
         "favorite": "我的最愛",
         "rating": "評分",
-        "culling": "挑片",
+        "culling": "選片",
         "date": "日期",
         "date_taken": "拍攝日期",
         "date_created": "建立日期",
@@ -284,7 +284,7 @@
   "search": {
     "title": "搜尋",
     "similar_images": "相關相片",
-    "image_search_placeholder": "搜尋圖片、檔案名稱或備註",
+    "image_search_placeholder": "搜尋圖片、檔名或描述",
     "matches": "相符項目",
     "unknown_location": "未知地點",
     "unknown_camera": "未知相機",
@@ -347,7 +347,7 @@
     "one_star": "1 星"
   },
   "culling": {
-    "title": "挑片",
+    "title": "選片",
     "picks": "入選",
     "rejected": "剔除",
     "unreviewed": "未檢視"
@@ -460,7 +460,7 @@
         "鏡頭",
         "年",
         "檔案類型",
-        "挑片"
+        "選片"
       ],
       "sort_type_options": [
         "拍攝日期",
@@ -742,7 +742,8 @@
       "create_montage": "建立拼貼",
       "save_xmp": "儲存中繼資料至 XMP",
       "xmp_save_success": "已儲存 {count} 個檔案的 XMP 中繼資料",
-      "xmp_save_failed": "{count} 個檔案的 XMP 儲存失敗"
+      "xmp_save_failed": "{count} 個檔案的 XMP 儲存失敗",
+      "comment": "描述…"
     },
     "calendar": {
       "monthly": "月",
@@ -791,7 +792,7 @@
       "unfavorite": "取消我的最愛",
       "tag": "標籤...",
       "collection": "收藏...",
-      "comment": "備註...",
+      "comment": "描述…",
       "rotate": "旋轉檢視"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "無法刪除標籤。"
     },
     "edit_comment": {
-      "title": "編輯備註",
-      "placeholder": "輸入備註",
+      "title": "編輯描述",
+      "placeholder": "輸入描述",
       "ok": "儲存"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "海拔",
     "geo_location": "地點",
     "tags": "標籤",
-    "comment": "備註",
-    "capture_settings": "拍攝設定"
+    "comment": "描述",
+    "capture_settings": "曝光參數",
+    "organization": "整理",
+    "file": "檔案",
+    "capture": "拍攝資訊",
+    "source_metadata": "來源檔案中繼資料",
+    "source_description": "原始描述",
+    "coordinates": "座標"
   },
   "map": {
     "show_map": "顯示地圖",
@@ -1363,10 +1370,13 @@
       "source_embedded": "內嵌",
       "source_rendered": "算繪",
       "source_brightened": "提亮",
-      "preview_mode": "RAW 預覽模式",
-      "section_xmp": "XMP 附屬檔案",
-      "xmp_import": "匯入 XMP 元資料",
-      "xmp_import_hint": "掃描和重新整理時讀取附屬檔案及支援的內嵌中繼資料，保留本機修改。"
+      "preview_mode": "RAW 預覽模式"
+    },
+    "metadata": {
+      "title": "中繼資料",
+      "section_import": "匯入中繼資料",
+      "import": "從 EXIF、IPTC 和 XMP 匯入",
+      "import_hint": "掃描和重新整理時匯入收藏、評分、選片標記、標籤和描述，保留本機編輯。"
     },
     "browse": {
       "section_album": "相簿資料夾",
@@ -1425,7 +1435,7 @@
         "地點",
         "相機",
         "鏡頭",
-        "拍攝設定"
+        "曝光參數"
       ],
       "show_thumbnail_badges": "顯示縮圖標記",
       "thumbnail_badge_options": [
@@ -1589,12 +1599,12 @@
         "toggle_favorite_and_next": "加入最愛 / 取消最愛 → 下一張",
         "set_clear_rating": "評分",
         "set_clear_rating_and_next": "評分 → 下一張",
-        "mark_pick": "挑片 · 入選",
-        "mark_pick_and_next": "挑片 · 入選 → 下一張",
-        "mark_rejected": "挑片 · 剔除",
-        "mark_rejected_and_next": "挑片 · 剔除 → 下一張",
-        "mark_unreviewed": "挑片 · 未檢視",
-        "mark_unreviewed_and_next": "挑片 · 未檢視 → 下一張",
+        "mark_pick": "選片 · 入選",
+        "mark_pick_and_next": "選片 · 入選 → 下一張",
+        "mark_rejected": "選片 · 剔除",
+        "mark_rejected_and_next": "選片 · 剔除 → 下一張",
+        "mark_unreviewed": "選片 · 未檢視",
+        "mark_unreviewed_and_next": "選片 · 未檢視 → 下一張",
         "clear_rating": "清除評分",
         "rate_one": "評為 1 星",
         "rate_two": "評為 2 星",
@@ -1603,7 +1613,7 @@
         "rate_five": "評為 5 星",
         "edit_tags": "標籤",
         "edit_collections": "收藏",
-        "edit_comment": "備註",
+        "edit_comment": "描述",
         "rotate": "旋轉檢視（順時針）",
         "rotate_counterclockwise": "旋轉檢視（逆時針）",
         "thumbnail_increase": "增大縮圖",

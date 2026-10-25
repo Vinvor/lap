@@ -284,7 +284,7 @@
   "search": {
     "title": "Wyszukiwanie",
     "similar_images": "Powiązane zdjęcia",
-    "image_search_placeholder": "Szukaj zdjęć, nazw plików lub komentarzy",
+    "image_search_placeholder": "Szukaj obrazów, nazw plików lub opisów",
     "matches": "Wyniki",
     "unknown_location": "Nieznana lokalizacja",
     "unknown_camera": "Nieznany aparat",
@@ -742,7 +742,8 @@
       "create_montage": "Utwórz kolaż",
       "save_xmp": "Zapisz metadane do XMP",
       "xmp_save_success": "Zapisano metadane XMP dla {count} plików",
-      "xmp_save_failed": "Nie udało się zapisać XMP dla {count} plików"
+      "xmp_save_failed": "Nie udało się zapisać XMP dla {count} plików",
+      "comment": "Opis…"
     },
     "calendar": {
       "monthly": "Miesięcznie",
@@ -791,7 +792,7 @@
       "unfavorite": "Usuń z ulubionych",
       "tag": "Tagi...",
       "collection": "Kolekcje...",
-      "comment": "Komentarze...",
+      "comment": "Opis…",
       "rotate": "Obróć widok"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Nie udało się usunąć taga."
     },
     "edit_comment": {
-      "title": "Edytuj komentarz",
-      "placeholder": "Wprowadź komentarz",
+      "title": "Edytuj opis",
+      "placeholder": "Wprowadź opis",
       "ok": "Zapisz"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Wysokość",
     "geo_location": "Lokalizacja",
     "tags": "Tagi",
-    "comment": "Komentarz",
-    "capture_settings": "Parametry zdjęcia"
+    "comment": "Opis",
+    "capture_settings": "Ekspozycja",
+    "organization": "Organizacja",
+    "file": "Plik",
+    "capture": "Fotografowanie",
+    "source_metadata": "Metadane pliku źródłowego",
+    "source_description": "Oryginalny opis",
+    "coordinates": "Współrzędne"
   },
   "map": {
     "show_map": "Pokaż mapę",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Osadzony",
       "source_rendered": "Renderowany",
       "source_brightened": "Rozjaśniona",
-      "preview_mode": "Tryb podglądu RAW",
-      "section_xmp": "Pliki pomocnicze XMP",
-      "xmp_import": "Importuj metadane XMP",
-      "xmp_import_hint": "Importuj pliki towarzyszące i obsługiwane osadzone metadane podczas skanowania i odświeżania, zachowując lokalne zmiany."
+      "preview_mode": "Tryb podglądu RAW"
+    },
+    "metadata": {
+      "title": "Metadane",
+      "section_import": "Importuj metadane",
+      "import": "Z EXIF, IPTC i XMP",
+      "import_hint": "Importuj ulubione, oceny, oznaczenia selekcji, tagi i opisy podczas skanowania i odświeżania, zachowując lokalne zmiany."
     },
     "browse": {
       "section_album": "Folder albumu",
@@ -1425,7 +1435,7 @@
         "Lokalizacja",
         "Aparat",
         "Obiektyw",
-        "Parametry zdjęcia"
+        "Ekspozycja"
       ],
       "show_thumbnail_badges": "Pokazuj znaczniki miniatur",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Oceń na 5 gwiazdek",
         "edit_tags": "Tagi",
         "edit_collections": "Kolekcje",
-        "edit_comment": "Komentarz",
+        "edit_comment": "Opis",
         "rotate": "Obróć widok (zgodnie ze wskazówkami zegara)",
         "rotate_counterclockwise": "Obróć widok (przeciwnie do wskazówek zegara)",
         "thumbnail_increase": "Zwiększ rozmiar miniatur",

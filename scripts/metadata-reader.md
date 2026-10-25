@@ -3,7 +3,7 @@
 Lap supplements its existing EXIF, LibRaw and video readers with the pinned
 `exiftool-rs 0.14.0` Rust library. No Perl or external ExifTool process is bundled.
 The extraction backend is read-only; it never writes media or sidecars.
-Manual **Save Metadata to XMP** writes ratings, culling flags, comments and tags
+Manual **Save Metadata to XMP** writes favorites, ratings, culling flags, comments and tags
 using Lap’s independent XML writer. It preserves unrelated properties and never
 writes the original media. There is no automatic sidecar export.
 
@@ -14,7 +14,7 @@ This is an internal implementation and validation note, not website content.
 - Existing technical fields win. Deep extraction fills missing camera, lens,
   original capture date and complete latitude/longitude pairs before geocoding.
 - Automatic organization metadata import uses the existing XMP import setting.
-  Ratings, pick/reject flags, keywords and descriptions may now come from embedded
+  Favorites, ratings, pick/reject flags, keywords and descriptions may now come from embedded
   XMP/IPTC/EXIF. Sidecar properties take precedence, including explicit empties.
 - The existing non-destructive import mode and dirty bits protect local edits
   and clears. This is fill-empty/merge behavior, not bidirectional synchronization.
@@ -106,3 +106,18 @@ supported ISO box formats.
 A non-unique `atags(name COLLATE NOCASE)` index supports case-insensitive tag
 lookup without merging or rejecting existing differently-cased tag rows. Existing
 libraries build this index once during schema initialization.
+
+## Lap Favorite schema
+
+Namespace URI: `https://github.com/julyx10/lap/ns/1.0/` (stable identifier).
+Property: `Favorite`, Boolean, emitted as `True` or `False`. Prefixes are arbitrary;
+readers match the URI and local property name. Attribute and element forms are
+accepted. Missing or invalid values remain unknown, not explicit false. A sidecar
+value overrides an embedded value. This is a Lap extension, not a cross-application
+Favorite standard; ratings, pick flags and keyword/label text never imply it.
+
+Automatic imports preserve existing favorites and locally edited/cleared states.
+Local favorite edits use dirty bit 16, independent of rating and culling. Manual
+sidecar export writes the current Boolean value, including false, without clearing
+local-edit protection. The embedded import fingerprint is v3 so unchanged libraries
+backfill this field once after upgrading. Both flags share one XML parsing pass.

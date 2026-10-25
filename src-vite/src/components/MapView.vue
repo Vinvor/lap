@@ -100,6 +100,8 @@ onMounted(() => {
     // attributionControl: false,
     keyboard: false,
     zoomControl: false,
+    // Scrolling the info sidebar should not change the map zoom.
+    scrollWheelZoom: false,
     maxZoom: 19,
   })
   map.attributionControl.setPrefix('')

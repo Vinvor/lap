@@ -76,12 +76,13 @@ fn from_bytes(bytes: &[u8], path: &Path) -> Metadata {
     let mut metadata = from_tags(&tags);
     if tags.iter().any(|tag| {
         tag.group.family0 == "XMP"
-            && ["pick", "good", "rejected", "label"]
+            && ["pick", "good", "rejected", "label", "favorite"]
                 .iter()
                 .any(|name| tag.name.eq_ignore_ascii_case(name))
     }) {
-        metadata.organization.culling_flag =
-            embedded_culling(bytes).or(metadata.organization.culling_flag);
+        let (culling, favorite) = embedded_flags(bytes);
+        metadata.organization.culling_flag = culling.or(metadata.organization.culling_flag);
+        metadata.organization.favorite = favorite;
     }
     metadata
 }
@@ -89,22 +90,23 @@ fn from_bytes(bytes: &[u8], path: &Path) -> Metadata {
 /// Resolve flags from their XML namespace URI, never from a user-chosen prefix.
 /// Only inspect container-designated metadata. PNG iTXt may compress its packet;
 /// other supported containers are handled by the bounded packet extractor.
-fn embedded_culling(bytes: &[u8]) -> Option<i32> {
+fn embedded_flags(bytes: &[u8]) -> (Option<i32>, Option<bool>) {
     const LIMIT: usize = 16 * 1024 * 1024;
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    let packets = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut packets = Vec::new();
         let mut pos = 8usize;
-        while pos.checked_add(12)? <= bytes.len() {
-            let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
-            let end = pos.checked_add(12)?.checked_add(len)?;
-            if end > bytes.len() {
-                return None;
-            }
-            let chunk = &bytes[pos + 8..pos + 8 + len];
-            if &bytes[pos + 4..pos + 8] == b"iTXt" {
-                if let Some(packet) = png_xmp_packet(chunk, LIMIT) {
-                    if let Some(flag) = parse_culling_packet(&packet) {
-                        return Some(flag);
-                    }
+        while pos.checked_add(12).is_some_and(|end| end <= bytes.len()) {
+            let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+            let Some(end) = pos
+                .checked_add(12)
+                .and_then(|p| p.checked_add(len))
+                .filter(|end| *end <= bytes.len())
+            else {
+                break;
+            };
+            if &bytes[pos + 4..pos + 8] == b"iTXt" && packets.len() < 32 {
+                if let Some(packet) = png_xmp_packet(&bytes[pos + 8..pos + 8 + len], LIMIT) {
+                    packets.push(packet);
                 }
             }
             if &bytes[pos + 4..pos + 8] == b"IEND" {
@@ -112,22 +114,24 @@ fn embedded_culling(bytes: &[u8]) -> Option<i32> {
             }
             pos = end;
         }
-        return None;
-    }
-    let packets: Vec<_> = xmp_packets::extract(bytes)
+        packets
+    } else {
+        xmp_packets::extract(bytes)
+    };
+    let packets: Vec<_> = packets
         .into_iter()
         .filter_map(|p| xmp_packets::decode(&p))
         .collect();
-    crate::t_xmp::culling_from_packets(&packets)
+    crate::t_xmp::flags_from_packets(&packets)
+}
+
+#[cfg(test)]
+fn embedded_culling(bytes: &[u8]) -> Option<i32> {
+    embedded_flags(bytes).0
 }
 
 #[path = "t_xmp_packets.rs"]
 mod xmp_packets;
-
-fn parse_culling_packet(packet: &[u8]) -> Option<i32> {
-    let text = xmp_packets::decode(packet)?;
-    crate::t_xmp::parse_xmp_str(&text).ok()?.culling_flag
-}
 
 fn png_xmp_packet(chunk: &[u8], limit: usize) -> Option<Vec<u8>> {
     use std::io::Read;
@@ -844,5 +848,58 @@ mod deep_review {
                 .culling_flag,
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+    #[test]
+    fn embedded_favorite_is_read_by_uri_in_jpeg_png_and_utf16() {
+        use std::io::Write;
+        for favorite in [true, false] {
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:custom=\"{}\" custom:Favorite=\"{}\"/></rdf:RDF>",
+                crate::t_xmp::NS_RDF,
+                crate::t_xmp::NS_LAP,
+                if favorite { "True" } else { "False" }
+            );
+            let jpeg = tests::jpeg_with_xmp_packet(xml.as_bytes());
+            assert_eq!(
+                from_bytes(&jpeg, Path::new("favorite.jpg"))
+                    .organization
+                    .favorite,
+                Some(favorite)
+            );
+            let mut utf16 = vec![0xff, 0xfe];
+            for word in xml.encode_utf16() {
+                utf16.extend(word.to_le_bytes());
+            }
+            assert_eq!(
+                from_bytes(
+                    &tests::jpeg_with_xmp_packet(&utf16),
+                    Path::new("favorite.jpg")
+                )
+                .organization
+                .favorite,
+                Some(favorite)
+            );
+            let mut encoder =
+                flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(xml.as_bytes()).unwrap();
+            let mut chunk = b"XML:com.adobe.xmp\0\x01\0\0\0".to_vec();
+            chunk.extend(encoder.finish().unwrap());
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            png.extend((chunk.len() as u32).to_be_bytes());
+            png.extend(b"iTXt");
+            png.extend(chunk);
+            png.extend([0; 4]);
+            assert_eq!(
+                from_bytes(&png, Path::new("favorite.png"))
+                    .organization
+                    .favorite,
+                Some(favorite)
+            );
+        }
     }
 }

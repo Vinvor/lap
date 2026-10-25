@@ -284,7 +284,7 @@
   "search": {
     "title": "Suche",
     "similar_images": "Verwandte Fotos",
-    "image_search_placeholder": "Bilder, Dateinamen oder Kommentare suchen",
+    "image_search_placeholder": "Bilder, Dateinamen oder Beschreibungen suchen",
     "matches": "Treffer",
     "unknown_location": "Unbekannter Ort",
     "unknown_camera": "Unbekannte Kamera",
@@ -742,7 +742,8 @@
       "create_montage": "Collage erstellen",
       "save_xmp": "Metadaten in XMP speichern",
       "xmp_save_success": "XMP-Metadaten für {count} Datei(en) gespeichert",
-      "xmp_save_failed": "XMP konnte für {count} Datei(en) nicht gespeichert werden"
+      "xmp_save_failed": "XMP konnte für {count} Datei(en) nicht gespeichert werden",
+      "comment": "Beschreibung…"
     },
     "calendar": {
       "monthly": "Monatlich",
@@ -791,7 +792,7 @@
       "unfavorite": "Entfavorisieren",
       "tag": "Tags...",
       "collection": "Sammlungen...",
-      "comment": "Kommentare...",
+      "comment": "Beschreibung…",
       "rotate": "Ansicht drehen"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Tag konnte nicht gelöscht werden."
     },
     "edit_comment": {
-      "title": "Kommentar bearbeiten",
-      "placeholder": "Kommentar",
+      "title": "Beschreibung bearbeiten",
+      "placeholder": "Beschreibung eingeben",
       "ok": "Speichern"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Höhe",
     "geo_location": "Ort",
     "tags": "Tags",
-    "comment": "Kommentar",
-    "capture_settings": "Aufnahmeeinst."
+    "comment": "Beschreibung",
+    "capture_settings": "Belichtung",
+    "organization": "Organisation",
+    "file": "Datei",
+    "capture": "Aufnahme",
+    "source_metadata": "Quelldatei-Metadaten",
+    "source_description": "Originalbeschreibung",
+    "coordinates": "Koordinaten"
   },
   "map": {
     "show_map": "Karte anzeigen",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Eingebettet",
       "source_rendered": "Gerendert",
       "source_brightened": "Aufgehellt",
-      "preview_mode": "RAW-Vorschaumodus",
-      "section_xmp": "XMP-Sidecars",
-      "xmp_import": "XMP-Metadaten importieren",
-      "xmp_import_hint": "Begleitdateien und unterstützte eingebettete Metadaten beim Scannen und Aktualisieren importieren. Lokale Änderungen bleiben erhalten."
+      "preview_mode": "RAW-Vorschaumodus"
+    },
+    "metadata": {
+      "title": "Metadaten",
+      "section_import": "Metadaten importieren",
+      "import": "Aus EXIF, IPTC und XMP",
+      "import_hint": "Beim Scannen und Aktualisieren Favoriten, Bewertungen, Auswahlmarkierungen, Tags und Beschreibungen importieren. Lokale Änderungen bleiben erhalten."
     },
     "browse": {
       "section_album": "Albumordner",
@@ -1425,7 +1435,7 @@
         "Ort",
         "Kamera",
         "Objektiv",
-        "Einstellungen"
+        "Belichtung"
       ],
       "show_thumbnail_badges": "Miniatur-Abzeichen anzeigen",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "5 Sterne bewerten",
         "edit_tags": "Tags",
         "edit_collections": "Sammlungen",
-        "edit_comment": "Kommentar",
+        "edit_comment": "Beschreibung",
         "rotate": "Ansicht im Uhrzeigersinn drehen",
         "rotate_counterclockwise": "Ansicht gegen den Uhrzeigersinn drehen",
         "thumbnail_increase": "Miniaturansicht vergrößern",

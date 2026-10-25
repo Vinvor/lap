@@ -284,7 +284,7 @@
   "search": {
     "title": "Search",
     "similar_images": "Related photos",
-    "image_search_placeholder": "Search images, filenames, or comments",
+    "image_search_placeholder": "Search images, filenames, or descriptions",
     "matches": "Matches",
     "unknown_location": "Unknown location",
     "unknown_camera": "Unknown camera",
@@ -742,7 +742,8 @@
       "create_montage": "Create collage",
       "save_xmp": "Save Metadata to XMP",
       "xmp_save_success": "Saved XMP metadata for {count} file(s)",
-      "xmp_save_failed": "Failed to save XMP for {count} file(s)"
+      "xmp_save_failed": "Failed to save XMP for {count} file(s)",
+      "comment": "Description…"
     },
     "calendar": {
       "monthly": "Monthly",
@@ -791,7 +792,7 @@
       "unfavorite": "Unfavorite",
       "tag": "Tags...",
       "collection": "Collections...",
-      "comment": "Comments...",
+      "comment": "Description…",
       "rotate": "Rotate view"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Failed to delete tag."
     },
     "edit_comment": {
-      "title": "Edit comment",
-      "placeholder": "Enter comment",
+      "title": "Edit description",
+      "placeholder": "Enter description",
       "ok": "Save"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Altitude",
     "geo_location": "Location",
     "tags": "Tags",
-    "comment": "Comment",
-    "capture_settings": "Capture settings"
+    "comment": "Description",
+    "capture_settings": "Exposure",
+    "organization": "Organization",
+    "file": "File",
+    "capture": "Capture",
+    "source_metadata": "Source metadata",
+    "source_description": "Original description",
+    "coordinates": "Coordinates"
   },
   "map": {
     "show_map": "Show map",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Embedded",
       "source_rendered": "Rendered",
       "source_brightened": "Brightened",
-      "preview_mode": "RAW preview mode",
-      "section_xmp": "XMP Sidecars",
-      "xmp_import": "Import XMP Metadata",
-      "xmp_import_hint": "Import sidecar and supported embedded metadata during scans and refreshes, preserving local edits."
+      "preview_mode": "RAW preview mode"
+    },
+    "metadata": {
+      "title": "Metadata",
+      "section_import": "Import metadata",
+      "import": "From EXIF, IPTC and XMP",
+      "import_hint": "Import favorites, ratings, culling flags, tags and descriptions during scans and refreshes, preserving local edits."
     },
     "browse": {
       "section_album": "Album folder",
@@ -1425,7 +1435,7 @@
         "Location",
         "Camera",
         "Lens",
-        "Capture settings"
+        "Exposure"
       ],
       "show_thumbnail_badges": "Show thumbnail badges",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Rate 5 stars",
         "edit_tags": "Tags",
         "edit_collections": "Collections",
-        "edit_comment": "Comment",
+        "edit_comment": "Description",
         "rotate": "Rotate view (clockwise)",
         "rotate_counterclockwise": "Rotate view (counterclockwise)",
         "thumbnail_increase": "Increase thumbnail size",

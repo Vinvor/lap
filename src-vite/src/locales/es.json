@@ -284,7 +284,7 @@
   "search": {
     "title": "Búsqueda",
     "similar_images": "Fotos relacionadas",
-    "image_search_placeholder": "Buscar imágenes, nombres de archivo o comentarios",
+    "image_search_placeholder": "Buscar imágenes, nombres de archivo o descripciones",
     "matches": "Coincidencias",
     "unknown_location": "Ubicación desconocida",
     "unknown_camera": "Cámara desconocida",
@@ -742,7 +742,8 @@
       "create_montage": "Crear collage",
       "save_xmp": "Guardar metadatos en XMP",
       "xmp_save_success": "Metadatos XMP guardados para {count} archivo(s)",
-      "xmp_save_failed": "No se pudo guardar XMP para {count} archivo(s)"
+      "xmp_save_failed": "No se pudo guardar XMP para {count} archivo(s)",
+      "comment": "Descripción…"
     },
     "calendar": {
       "monthly": "Mensual",
@@ -791,7 +792,7 @@
       "unfavorite": "No favorito",
       "tag": "Etiquetas...",
       "collection": "Colecciones...",
-      "comment": "Comentarios...",
+      "comment": "Descripción…",
       "rotate": "Rotar vista"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "No se pudo eliminar la etiqueta."
     },
     "edit_comment": {
-      "title": "Editar comentario",
-      "placeholder": "Introduce comentario",
+      "title": "Editar descripción",
+      "placeholder": "Introducir descripción",
       "ok": "Guardar"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Altitud",
     "geo_location": "Ubicación",
     "tags": "Etiquetas",
-    "comment": "Comentario",
-    "capture_settings": "Ajustes captura"
+    "comment": "Descripción",
+    "capture_settings": "Exposición",
+    "organization": "Organización",
+    "file": "Archivo",
+    "capture": "Captura",
+    "source_metadata": "Metadatos del archivo original",
+    "source_description": "Descripción original",
+    "coordinates": "Coordenadas"
   },
   "map": {
     "show_map": "Ver mapa",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Incrustada",
       "source_rendered": "Renderizada",
       "source_brightened": "Aclarada",
-      "preview_mode": "Modo de vista previa RAW",
-      "section_xmp": "Archivos XMP",
-      "xmp_import": "Importar metadatos XMP",
-      "xmp_import_hint": "Importar archivos asociados y metadatos integrados compatibles al analizar y actualizar, conservando los cambios locales."
+      "preview_mode": "Modo de vista previa RAW"
+    },
+    "metadata": {
+      "title": "Metadatos",
+      "section_import": "Importar metadatos",
+      "import": "Desde EXIF, IPTC y XMP",
+      "import_hint": "Importar favoritos, valoraciones, marcas de selección, etiquetas y descripciones durante los escaneos y actualizaciones, conservando las ediciones locales."
     },
     "browse": {
       "section_album": "Carpeta de álbum",
@@ -1425,7 +1435,7 @@
         "Ubicación",
         "Cámara",
         "Lente",
-        "Ajustes captura"
+        "Exposición"
       ],
       "show_thumbnail_badges": "Mostrar insignias de miniaturas",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Calificar 5 estrellas",
         "edit_tags": "Etiquetas",
         "edit_collections": "Colecciones",
-        "edit_comment": "Comentario",
+        "edit_comment": "Descripción",
         "rotate": "Rotar vista en sentido horario",
         "rotate_counterclockwise": "Rotar vista en sentido antihorario",
         "thumbnail_increase": "Aumentar miniaturas",

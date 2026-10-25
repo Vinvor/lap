@@ -284,7 +284,7 @@
   "search": {
     "title": "Pesquisa",
     "similar_images": "Fotos relacionadas",
-    "image_search_placeholder": "Pesquisar imagens, nomes de arquivo ou comentários",
+    "image_search_placeholder": "Pesquisar imagens, nomes de ficheiros ou descrições",
     "matches": "Correspondências",
     "unknown_location": "Local desconhecido",
     "unknown_camera": "Câmera desconhecida",
@@ -742,7 +742,8 @@
       "create_montage": "Criar colagem",
       "save_xmp": "Salvar metadados em XMP",
       "xmp_save_success": "Metadados XMP salvos para {count} arquivo(s)",
-      "xmp_save_failed": "Falha ao salvar XMP para {count} arquivo(s)"
+      "xmp_save_failed": "Falha ao salvar XMP para {count} arquivo(s)",
+      "comment": "Descrição…"
     },
     "calendar": {
       "monthly": "Mensal",
@@ -791,7 +792,7 @@
       "unfavorite": "Desfavoritar",
       "tag": "Tags...",
       "collection": "Coleções...",
-      "comment": "Comentários...",
+      "comment": "Descrição…",
       "rotate": "Girar visualização"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Falha ao excluir a tag."
     },
     "edit_comment": {
-      "title": "Editar comentário",
-      "placeholder": "Comentário",
+      "title": "Editar descrição",
+      "placeholder": "Introduzir descrição",
       "ok": "Salvar"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Altitude",
     "geo_location": "Local",
     "tags": "Tags",
-    "comment": "Comentário",
-    "capture_settings": "Config. captura"
+    "comment": "Descrição",
+    "capture_settings": "Exposição",
+    "organization": "Organização",
+    "file": "Ficheiro",
+    "capture": "Captura",
+    "source_metadata": "Metadados do ficheiro original",
+    "source_description": "Descrição original",
+    "coordinates": "Coordenadas"
   },
   "map": {
     "show_map": "Mostrar mapa",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Incorporada",
       "source_rendered": "Renderizada",
       "source_brightened": "Clareada",
-      "preview_mode": "Modo de pré-visualização RAW",
-      "section_xmp": "Sidecars XMP",
-      "xmp_import": "Importar metadados XMP",
-      "xmp_import_hint": "Importar arquivos auxiliares e metadados incorporados compatíveis ao verificar e atualizar, preservando alterações locais."
+      "preview_mode": "Modo de pré-visualização RAW"
+    },
+    "metadata": {
+      "title": "Metadados",
+      "section_import": "Importar metadados",
+      "import": "De EXIF, IPTC e XMP",
+      "import_hint": "Importar favoritos, avaliações, marcações de seleção, etiquetas e descrições durante verificações e atualizações, preservando as edições locais."
     },
     "browse": {
       "section_album": "Pasta do álbum",
@@ -1425,7 +1435,7 @@
         "Local",
         "Câmera",
         "Lente",
-        "Configurações"
+        "Exposição"
       ],
       "show_thumbnail_badges": "Mostrar emblemas de miniaturas",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Avaliar 5 estrelas",
         "edit_tags": "Tags",
         "edit_collections": "Coleções",
-        "edit_comment": "Comentário",
+        "edit_comment": "Descrição",
         "rotate": "Girar visualização no sentido horário",
         "rotate_counterclockwise": "Girar visualização no sentido anti-horário",
         "thumbnail_increase": "Aumentar miniaturas",

@@ -305,6 +305,22 @@ export function formatDuration(seconds: number): string {
   }
 }
 
+/** Display latitude first in DMS; rounding total seconds handles minute/degree carry. */
+export function formatGpsCoordinates(latitude: number | string | null | undefined, longitude: number | string | null | undefined): string {
+  if (latitude == null || longitude == null || String(latitude).trim() === '' || String(longitude).trim() === '') return '';
+  const lat = Number(latitude);
+  const lon = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return '';
+  const format = (value: number, positive: string, negative: string) => {
+    const hundredths = Math.round(Math.abs(value) * 360000);
+    const degrees = Math.floor(hundredths / 360000);
+    const minutes = Math.floor((hundredths % 360000) / 6000);
+    const seconds = ((hundredths % 6000) / 100).toFixed(2);
+    return `${degrees}°${String(minutes).padStart(2, '0')}′${seconds.padStart(5, '0')}″ ${value < 0 ? negative : positive}`;
+  };
+  return `${format(lat, 'N', 'S')}, ${format(lon, 'E', 'W')}`;
+}
+
 /// format camera 
 export function formatCameraInfo(make: string, model: string): string {
   if (!make && !model) return "";

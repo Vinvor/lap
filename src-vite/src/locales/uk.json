@@ -284,7 +284,7 @@
   "search": {
     "title": "Пошук",
     "similar_images": "Схожі фотографії",
-    "image_search_placeholder": "Шукайте зображення, назви файлів або коментарі",
+    "image_search_placeholder": "Пошук зображень, назв файлів або описів",
     "matches": "Збіги",
     "unknown_location": "Невідоме місце",
     "unknown_camera": "Невідома камера",
@@ -742,7 +742,8 @@
       "create_montage": "Створити колаж",
       "save_xmp": "Зберегти метадані в XMP",
       "xmp_save_success": "Метадані XMP збережено для {count} файлів",
-      "xmp_save_failed": "Не вдалося зберегти XMP для {count} файлів"
+      "xmp_save_failed": "Не вдалося зберегти XMP для {count} файлів",
+      "comment": "Опис…"
     },
     "calendar": {
       "monthly": "Помісячно",
@@ -791,7 +792,7 @@
       "unfavorite": "Прибрати з улюблених",
       "tag": "Теги...",
       "collection": "Добірки...",
-      "comment": "Коментарі...",
+      "comment": "Опис…",
       "rotate": "Повернути вигляд"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Не вдалося видалити тег."
     },
     "edit_comment": {
-      "title": "Редагувати коментар",
-      "placeholder": "Введіть коментар",
+      "title": "Редагувати опис",
+      "placeholder": "Введіть опис",
       "ok": "Зберегти"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Висота",
     "geo_location": "Місце",
     "tags": "Теги",
-    "comment": "Коментар",
-    "capture_settings": "Параметри знімка"
+    "comment": "Опис",
+    "capture_settings": "Експозиція",
+    "organization": "Упорядкування",
+    "file": "Файл",
+    "capture": "Зйомка",
+    "source_metadata": "Метадані вихідного файлу",
+    "source_description": "Початковий опис",
+    "coordinates": "Координати"
   },
   "map": {
     "show_map": "Показати мапу",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Вбудований",
       "source_rendered": "Оброблений",
       "source_brightened": "Освітлений",
-      "preview_mode": "Режим попереднього перегляду RAW",
-      "section_xmp": "XMP-файли",
-      "xmp_import": "Імпорт метаданих XMP",
-      "xmp_import_hint": "Імпортувати супровідні файли та підтримувані вбудовані метадані під час сканування й оновлення, зберігаючи локальні зміни."
+      "preview_mode": "Режим попереднього перегляду RAW"
+    },
+    "metadata": {
+      "title": "Метадані",
+      "section_import": "Імпорт метаданих",
+      "import": "З EXIF, IPTC і XMP",
+      "import_hint": "Імпортувати улюблене, оцінки, позначки відбору, теги й описи під час сканування та оновлення, зберігаючи локальні зміни."
     },
     "browse": {
       "section_album": "Папка альбому",
@@ -1425,7 +1435,7 @@
         "Місце",
         "Камера",
         "Об'єктив",
-        "Параметри знімка"
+        "Експозиція"
       ],
       "show_thumbnail_badges": "Показувати значки на мініатюрах",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Оцінити у 5 зірок",
         "edit_tags": "Теги",
         "edit_collections": "Добірки",
-        "edit_comment": "Коментар",
+        "edit_comment": "Опис",
         "rotate": "Повернути вигляд (за годинниковою)",
         "rotate_counterclockwise": "Повернути вигляд (проти годинникової)",
         "thumbnail_increase": "Збільшити розмір мініатюри",

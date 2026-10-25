@@ -8,6 +8,7 @@
 //!
 //! | Lap Field | Canonical Namespace URI | XMP Property / Element | Mapping Rules |
 //! | :--- | :--- | :--- | :--- |
+//! | `afiles.is_favorite` | `https://github.com/julyx10/lap/ns/1.0/` | `lap:Favorite` | Boolean; missing remains `None`; independent of rating, picks and labels. Lap-specific interoperability. |
 //! | `afiles.rating` | `http://ns.adobe.com/xap/1.0/` | `xmp:Rating` (`xap:Rating`) | `0..=5` → `Some(0..=5)`; `""` → `Some(0)`; `-1` → `Some(0)` (and sets reject flag if unflagged); missing → `None` |
 //! | `afiles.culling_flag` | `http://ns.adobe.com/xmp/1.0/DynamicMedia/`<br>`http://darktable.sf.net/`<br>`http://ns.adobe.com/xap/1.0/` | `xmpDM:pick` / `xmpDM:good`<br>`darktable:rejected`<br>`xmp:Rating="-1"` / `xmp:Label` | `xmpDM:pick="1"` or `xmp:Label="Pick"\|"Select"` → `Some(1)` (Pick)<br>`xmpDM:pick="-1"` or `darktable:rejected="1"` or `xmp:Rating="-1"` or `xmp:Label="Reject"\|"Rejected"` → `Some(2)` (Reject)<br>`xmpDM:pick="0"` or `darktable:rejected="0"` → `Some(0)` (Unflagged)<br>missing → `None` |
 //! | `atags` / `afile_tags` | `http://purl.org/dc/elements/1.1/`<br>`http://ns.adobe.com/lightroom/1.0/`<br>`http://www.digikam.org/ns/1.0/` | `dc:subject` (`rdf:Bag`)<br>`lr:hierarchicalSubject` (`rdf:Bag`)<br>`digiKam:TagsList` (`rdf:Seq`) | Deduplicated union preserving order; internal `darktable\|*` system tags excluded; empty container → `Some(vec![])`; missing → `None` |
@@ -31,6 +32,8 @@ use std::sync::{
 use crate::t_sqlite::open_conn;
 
 // Canonical XMP Namespace URIs
+/// Lap-owned schema. URI identity is stable and need not resolve to a web page.
+pub const NS_LAP: &str = "https://github.com/julyx10/lap/ns/1.0/";
 pub const NS_XMP: &str = "http://ns.adobe.com/xap/1.0/";
 pub const NS_XMP_DM: &str = "http://ns.adobe.com/xmp/1.0/DynamicMedia/";
 pub const NS_DARKTABLE: &str = "http://darktable.sf.net/";
@@ -56,6 +59,8 @@ pub fn set_xmp_import_enabled(enabled: bool) {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XmpMetadata {
+    /// Missing is distinct from explicit false. Independent of ratings and picks.
+    pub favorite: Option<bool>,
     /// Star rating (`0..=5`).
     /// - `None`: rating property is omitted from the sidecar.
     /// - `Some(0)`: explicitly unrated (`0` or `""`, or `-1` when mapped to reject).
@@ -257,6 +262,9 @@ pub fn parse_xmp_str(content: &str) -> Result<XmpMetadata, String> {
             .map(|n| n.value())
     };
     let mut meta = XmpMetadata::default();
+    meta.favorite = value(NS_LAP, "Favorite")
+        .as_deref()
+        .and_then(parse_favorite);
     let mut rejected = false;
     if let Some(v) = value(NS_XMP, "Rating") {
         if v.trim().is_empty() {
@@ -312,7 +320,7 @@ pub fn parse_xmp_str(content: &str) -> Result<XmpMetadata, String> {
 
 /// Standard and referenced extended XMP are one logical metadata record.
 /// Resolve namespace-aware properties before applying the shared flag precedence.
-pub(crate) fn culling_from_packets(packets: &[String]) -> Option<i32> {
+pub(crate) fn flags_from_packets(packets: &[String]) -> (Option<i32>, Option<bool>) {
     let roots: Vec<_> = packets
         .iter()
         .filter_map(|packet| parse_xml(packet).ok())
@@ -334,13 +342,32 @@ pub(crate) fn culling_from_packets(packets: &[String]) -> Option<i32> {
     let rejected = value(NS_DARKTABLE, "rejected");
     let label = value(NS_XMP, "Label");
     let rating = value(NS_XMP, "Rating").and_then(|v| v.trim().parse().ok());
-    culling_from_values(
+    let culling = culling_from_values(
         pick.as_deref(),
         good.as_deref(),
         rejected.as_deref(),
         label.as_deref(),
         rating,
+    );
+    (
+        culling,
+        value(NS_LAP, "Favorite")
+            .as_deref()
+            .and_then(parse_favorite),
     )
+}
+
+fn parse_favorite(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn culling_from_packets(packets: &[String]) -> Option<i32> {
+    flags_from_packets(packets).0
 }
 
 /// Returns `true` for internal darktable / host system tags that should not be imported as user tags.
@@ -412,7 +439,7 @@ pub fn import_xmp_for_file_with_conn(
         .transpose()
         .map_err(|e| e.to_string())?;
     let fingerprint = format!(
-        "embedded-v2:{}:{:?}:{}:{:?}:{:?}",
+        "embedded-v3:{}:{:?}:{}:{:?}:{:?}",
         file_path,
         media_info.as_ref().and_then(|info| info.modified().ok()),
         media_info.map(|info| info.len()).unwrap_or(0),
@@ -446,6 +473,7 @@ pub fn import_xmp_for_file_with_conn(
         let mut embedded = crate::t_metadata::read(Path::new(file_path)).organization;
         if let Some(path) = sidecar_path {
             let sidecar = read_xmp_file(&path)?;
+            embedded.favorite = sidecar.favorite.or(embedded.favorite);
             embedded.rating = sidecar.rating.or(embedded.rating);
             embedded.culling_flag = sidecar.culling_flag.or(embedded.culling_flag);
             embedded.tags = sidecar.tags.or(embedded.tags);
@@ -484,7 +512,12 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
     );",
     )
     .map_err(|e| e.to_string())?;
-    for (column, bit) in [("rating", 1), ("culling_flag", 2), ("comments", 4)] {
+    for (column, bit) in [
+        ("rating", 1),
+        ("culling_flag", 2),
+        ("comments", 4),
+        ("is_favorite", 16),
+    ] {
         conn.execute_batch(&format!(
             "CREATE TRIGGER IF NOT EXISTS axmp_local_{column}
         AFTER UPDATE OF {column} ON afiles WHEN NEW.{column} IS NOT OLD.{column}
@@ -554,10 +587,27 @@ fn apply_fields(
     mode: XmpImportMode,
     dirty: i32,
 ) -> Result<bool, String> {
-    let (db_rating, db_culling_flag, db_comments): (i32, i32, Option<String>) = conn.query_row(
-        "SELECT COALESCE(rating, 0), COALESCE(culling_flag, 0), comments FROM afiles WHERE id = ?1", [file_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    let (db_rating, db_culling_flag, db_comments, db_favorite): (i32, i32, Option<String>, bool) = conn.query_row(
+        "SELECT COALESCE(rating, 0), COALESCE(culling_flag, 0), comments, COALESCE(is_favorite, 0) FROM afiles WHERE id = ?1", [file_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     ).map_err(|e| e.to_string())?;
+
+    if let Some(favorite) = meta.favorite {
+        let should_update = match mode {
+            XmpImportMode::InitialScan => favorite,
+            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
+                dirty & 16 == 0 && !db_favorite && favorite
+            }
+            XmpImportMode::ManualOverwrite => favorite != db_favorite,
+        };
+        if should_update {
+            conn.execute(
+                "UPDATE afiles SET is_favorite=?1 WHERE id=?2",
+                params![favorite, file_id],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
 
     // 1. Rating
     if let Some(rating) = meta.rating {
@@ -900,7 +950,7 @@ fn parse_xml(content: &str) -> Result<XmlNode, String> {
 
 static SERIAL: AtomicU64 = AtomicU64::new(0);
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-const ALL: i32 = 1 | 2 | 4 | 8;
+const ALL: i32 = 1 | 2 | 4 | 8 | 16;
 
 #[derive(Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -992,10 +1042,23 @@ fn tag_property(uri: &str, name: &[u8]) -> bool {
     )
 }
 
+#[cfg(test)]
 fn merge_with_culling(
     xml: &str,
     rating: i32,
     culling: i32,
+    tags: &[String],
+    description: &str,
+    mask: i32,
+) -> Result<String, String> {
+    merge_with_favorite(xml, rating, culling, false, tags, description, mask & !16)
+}
+
+fn merge_with_favorite(
+    xml: &str,
+    rating: i32,
+    culling: i32,
+    favorite: bool,
     tags: &[String],
     description: &str,
     mask: i32,
@@ -1064,7 +1127,10 @@ fn merge_with_culling(
                         let a = a.map_err(|e| e.to_string())?;
                         let (ns, local) = reader.resolve_attribute(a.key);
                         let uri = namespace(ns)?;
-                        let own = (uri == NS_XMP && local.as_ref() == b"Rating" && mask & 1 != 0)
+                        let own = (uri == NS_LAP
+                            && local.as_ref() == b"Favorite"
+                            && mask & 16 != 0)
+                            || (uri == NS_XMP && local.as_ref() == b"Rating" && mask & 1 != 0)
                             || (tag_property(&uri, local.as_ref()) && mask & 8 != 0)
                             || (uri == NS_DC && local.as_ref() == b"description" && mask & 4 != 0)
                             || (mask & 2 != 0
@@ -1168,7 +1234,8 @@ fn merge_with_culling(
         {
             continue;
         }
-        if (mask & 1 != 0 && n.uri == NS_XMP && n.name == "Rating")
+        if (mask & 16 != 0 && n.uri == NS_LAP && n.name == "Favorite")
+            || (mask & 1 != 0 && n.uri == NS_XMP && n.name == "Rating")
             || (mask & 8 != 0 && tag_property(&n.uri, n.name.as_bytes()))
             || (mask & 2 != 0
                 && culling_property(&n.uri, n.name.as_bytes(), &property_text(xml, n)?))
@@ -1225,6 +1292,12 @@ fn merge_with_culling(
         }
     }
     let mut properties = String::new();
+    if mask & 16 != 0 {
+        properties += &format!(
+            "<lap:Favorite xmlns:lap=\"{NS_LAP}\">{}</lap:Favorite>",
+            if favorite { "True" } else { "False" }
+        );
+    }
     if mask & 1 != 0 {
         properties += &format!("<xmp:Rating>{}</xmp:Rating>", rating.clamp(0, 5));
     }
@@ -1426,9 +1499,9 @@ fn destination(media: &Path, cache: &mut ExportIndex) -> Result<PathBuf, String>
 fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result<(), String> {
     // A consistent catalog snapshot for this explicit manual export.
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let (folder, name, rating, culling, description): (String, String, i32, i32, String) = tx
-        .query_row("SELECT f.path,a.name,COALESCE(a.rating,0),COALESCE(a.culling_flag,0),COALESCE(a.comments,'') FROM afiles a JOIN afolders f ON f.id=a.folder_id WHERE a.id=?1",
-            [file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))
+    let (folder, name, rating, culling, description, favorite): (String, String, i32, i32, String, bool) = tx
+        .query_row("SELECT f.path,a.name,COALESCE(a.rating,0),COALESCE(a.culling_flag,0),COALESCE(a.comments,''),COALESCE(a.is_favorite,0) FROM afiles a JOIN afolders f ON f.id=a.folder_id WHERE a.id=?1",
+            [file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)))
         .map_err(|e|e.to_string())?;
     let tags: Vec<String> = {
         let mut stmt=tx.prepare("SELECT t.name FROM atags t JOIN afile_tags ft ON ft.tag_id=t.id WHERE ft.file_id=?1 ORDER BY t.name COLLATE NOCASE,t.id").map_err(|e|e.to_string())?;
@@ -1464,7 +1537,7 @@ fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result
             "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"{NS_RDF}\"></rdf:RDF></x:xmpmeta>"
         ),
     };
-    let output = merge_with_culling(&xml, rating, culling, &tags, &description, ALL)?;
+    let output = merge_with_favorite(&xml, rating, culling, favorite, &tags, &description, ALL)?;
     let temp = dest.with_file_name(format!(
         ".lap-xmp-{}-{}.tmp",
         std::process::id(),
@@ -1599,6 +1672,7 @@ mod import_tests {
                 name TEXT NOT NULL,
                 rating INTEGER NOT NULL DEFAULT 0,
                 culling_flag INTEGER NOT NULL DEFAULT 0,
+                is_favorite INTEGER DEFAULT 0,
                 comments TEXT,
                 has_tags INTEGER DEFAULT 0
             );
@@ -1818,6 +1892,7 @@ mod import_tests {
 
         // 1. Initial scan imports metadata from XMP
         let initial_xmp = XmpMetadata {
+            favorite: None,
             rating: Some(2),
             culling_flag: Some(1), // Pick
             tags: Some(vec!["Landscape".to_string()]),
@@ -1855,6 +1930,7 @@ mod import_tests {
 
         // 3. Background rescan runs on an updated sidecar (e.g. darktable saved exposure history with old Rating=2, Flag=1, and added "Mountains" tag)
         let rescan_xmp = XmpMetadata {
+            favorite: None,
             rating: Some(2),
             culling_flag: Some(1),
             tags: Some(vec!["Landscape".to_string(), "Mountains".to_string()]),
@@ -1947,6 +2023,7 @@ mod import_tests {
         let conn = setup_in_memory_db();
         file(&conn);
         let meta = XmpMetadata {
+            favorite: None,
             rating: Some(4),
             culling_flag: Some(1),
             description: Some("caption".into()),
@@ -2215,7 +2292,7 @@ mod export_tests {
         fs::write(&media, b"unchanged-original").unwrap();
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE afolders(id INTEGER PRIMARY KEY,path TEXT); INSERT INTO afolders(id) VALUES(1);
-            CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER DEFAULT 1,name TEXT DEFAULT 'photo.jpg',rating INTEGER DEFAULT 0,culling_flag INTEGER DEFAULT 0,comments TEXT,has_tags INTEGER DEFAULT 0);
+            CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER DEFAULT 1,name TEXT DEFAULT 'photo.jpg',is_favorite INTEGER DEFAULT 0,rating INTEGER DEFAULT 0,culling_flag INTEGER DEFAULT 0,comments TEXT,has_tags INTEGER DEFAULT 0);
             CREATE TABLE atags(id INTEGER PRIMARY KEY,name TEXT,group_id INTEGER);CREATE TABLE afile_tags(file_id INTEGER,tag_id INTEGER,UNIQUE(file_id,tag_id));
             CREATE TABLE atag_groups(id INTEGER PRIMARY KEY,is_default INTEGER);INSERT INTO atag_groups VALUES(1,1);
             INSERT INTO afiles(id,rating,comments) VALUES(1,4,'local caption'); INSERT INTO atags VALUES(1,'旅行, travel & <test>',1);INSERT INTO afile_tags VALUES(1,1);").unwrap();
@@ -2951,5 +3028,163 @@ mod export_tests {
             "{plan}"
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn favorite_namespace_boolean_and_independence() {
+        for (value, expected) in [
+            ("True", Some(true)),
+            ("false", Some(false)),
+            ("1", Some(true)),
+            ("0", Some(false)),
+            ("", None),
+            ("yes", None),
+        ] {
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:own=\"{NS_LAP}\" own:Favorite=\"{value}\"/></rdf:RDF>"
+            );
+            assert_eq!(parse_xmp_str(&xml).unwrap().favorite, expected);
+            let element = format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:own=\"{NS_LAP}\"><own:Favorite>{value}</own:Favorite></rdf:Description></rdf:RDF>"
+            );
+            assert_eq!(parse_xmp_str(&element).unwrap().favorite, expected);
+        }
+        let xml = packet(
+            "<r:Rating>5</r:Rating><r:Label>Favorite</r:Label><d:subject><rdf:Bag><rdf:li>Favorite</rdf:li></rdf:Bag></d:subject><xmpDM:pick xmlns:xmpDM=\"http://ns.adobe.com/xmp/1.0/DynamicMedia/\">1</xmpDM:pick><lap:Favorite xmlns:lap=\"urn:spoof\">True</lap:Favorite>",
+        );
+        assert_eq!(parse_xmp_str(&xml).unwrap().favorite, None);
+        let standard = packet(&format!(
+            "<l:Favorite xmlns:l=\"{NS_LAP}\">True</l:Favorite>"
+        ));
+        let extended = packet(&format!(
+            "<l:Favorite xmlns:l=\"{NS_LAP}\">False</l:Favorite>"
+        ));
+        assert_eq!(flags_from_packets(&[standard, extended]).1, Some(false));
+    }
+
+    #[test]
+    fn favorite_export_roundtrip_and_local_unfavorite_protection() {
+        let (conn, dir, media) = fixture();
+        for favorite in [true, false, true] {
+            conn.execute("UPDATE afiles SET is_favorite=?1 WHERE id=1", [favorite])
+                .unwrap();
+            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+            let meta = read_xmp_file(&dir.join("photo.jpg.xmp")).unwrap();
+            assert_eq!(meta.favorite, Some(favorite));
+            assert_eq!(meta.rating, Some(4));
+            if std::env::var("LAP_TEST_EXIFTOOL").as_deref() == Ok("1") {
+                let output = std::process::Command::new("exiftool")
+                    .args(["-s3", "-Favorite"])
+                    .arg(dir.join("photo.jpg.xmp"))
+                    .output()
+                    .expect("ExifTool required for independent verification");
+                assert!(output.status.success());
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap().trim(),
+                    if favorite { "True" } else { "False" }
+                );
+            }
+            // Saving does not clear the local-edit protection bit.
+            let dirty: i32 = conn
+                .query_row("SELECT dirty FROM axmp_imports WHERE file_id=1", [], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            assert_ne!(dirty & 16, 0);
+        }
+        conn.execute("UPDATE afiles SET is_favorite=0 WHERE id=1", [])
+            .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RefreshNonDestructive,
+        )
+        .unwrap();
+        assert!(
+            !conn
+                .query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
+                    .get::<_, bool>(0))
+                .unwrap()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn favorite_sidecar_false_overrides_embedded_true_and_upgrade_backfills() {
+        let (conn, dir, media) = fixture();
+        let xml = packet(&format!(
+            "<custom:Favorite xmlns:custom=\"{NS_LAP}\">True</custom:Favorite>"
+        ));
+        fs::write(
+            &media,
+            crate::t_metadata::tests::jpeg_with_xmp_packet(xml.as_bytes()),
+        )
+        .unwrap();
+        let sidecar = dir.join("photo.jpg.xmp");
+        fs::write(
+            &sidecar,
+            packet(&format!(
+                "<custom:Favorite xmlns:custom=\"{NS_LAP}\">False</custom:Favorite>"
+            )),
+        )
+        .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::InitialScan,
+        )
+        .unwrap();
+        assert!(
+            !conn
+                .query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
+                    .get::<_, bool>(0))
+                .unwrap()
+        );
+        fs::remove_file(sidecar).unwrap();
+        conn.execute("UPDATE axmp_imports SET fingerprint=REPLACE(fingerprint,'embedded-v3:','embedded-v2:') WHERE file_id=1",[]).unwrap();
+        assert!(
+            import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RescanNonDestructive
+            )
+            .unwrap()
+        );
+        assert!(
+            conn.query_row("SELECT is_favorite FROM afiles WHERE id=1", [], |r| r
+                .get::<_, bool>(0))
+                .unwrap()
+        );
+        assert!(
+            !import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RescanNonDestructive
+            )
+            .unwrap()
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn favorite_replacement_preserves_unknown_properties_and_absence() {
+        let original = packet(&format!(
+            "<l:Favorite xmlns:l=\"{NS_LAP}\">True</l:Favorite><crs:Exposure2012>+1</crs:Exposure2012><r:Label>Red</r:Label>"
+        ));
+        let updated = merge_with_favorite(&original, 0, 0, false, &[], "", 16).unwrap();
+        assert_eq!(parse_xmp_str(&updated).unwrap().favorite, Some(false));
+        assert!(!updated.contains(">True</l:Favorite>"));
+        assert!(updated.contains("<r:Label>Red</r:Label>"));
+        assert!(updated.contains("<crs:Exposure2012>+1</crs:Exposure2012>"));
+        assert_eq!(
+            parse_xmp_str(&merge_with_favorite(&original, 3, 0, false, &[], "", 1).unwrap())
+                .unwrap()
+                .favorite,
+            Some(true)
+        );
     }
 }

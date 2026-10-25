@@ -284,7 +284,7 @@
   "search": {
     "title": "Keresés",
     "similar_images": "Kapcsolódó fotók",
-    "image_search_placeholder": "Képek, fájlnevek vagy megjegyzések keresése",
+    "image_search_placeholder": "Képek, fájlnevek vagy leírások keresése",
     "matches": "Egyezések",
     "unknown_location": "Ismeretlen hely",
     "unknown_camera": "Ismeretlen kamera",
@@ -742,7 +742,8 @@
       "create_montage": "Kollázs készítése",
       "save_xmp": "Metaadatok mentése XMP-be",
       "xmp_save_success": "XMP-metaadatok mentve {count} fájlhoz",
-      "xmp_save_failed": "Az XMP mentése sikertelen {count} fájlnál"
+      "xmp_save_failed": "Az XMP mentése sikertelen {count} fájlnál",
+      "comment": "Leírás…"
     },
     "calendar": {
       "monthly": "Havi",
@@ -791,7 +792,7 @@
       "unfavorite": "Kedvelés törlése",
       "tag": "Címkék...",
       "collection": "Gyűjtemények...",
-      "comment": "Megjegyzések...",
+      "comment": "Leírás…",
       "rotate": "Nézet elforgatása"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Nem sikerült törölni a címkét."
     },
     "edit_comment": {
-      "title": "Megjegyzés szerkesztése",
-      "placeholder": "Megjegyzés megadása",
+      "title": "Leírás szerkesztése",
+      "placeholder": "Leírás megadása",
       "ok": "Mentés"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Magasság",
     "geo_location": "Hely",
     "tags": "Címkék",
-    "comment": "Megjegyzés",
-    "capture_settings": "Felvételi beállítások"
+    "comment": "Leírás",
+    "capture_settings": "Expozíció",
+    "organization": "Rendszerezés",
+    "file": "Fájl",
+    "capture": "Felvétel",
+    "source_metadata": "Forrásfájl metaadatai",
+    "source_description": "Eredeti leírás",
+    "coordinates": "Koordináták"
   },
   "map": {
     "show_map": "Térkép megjelenítése",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Beágyazott",
       "source_rendered": "Feldolgozott",
       "source_brightened": "Felderített",
-      "preview_mode": "RAW-előnézet módja",
-      "section_xmp": "XMP mellékfájlok",
-      "xmp_import": "XMP metaadatok importálása",
-      "xmp_import_hint": "Kísérőfájlok és támogatott beágyazott metaadatok importálása kereséskor és frissítéskor, a helyi módosítások megőrzésével."
+      "preview_mode": "RAW-előnézet módja"
+    },
+    "metadata": {
+      "title": "Metaadatok",
+      "section_import": "Metaadatok importálása",
+      "import": "EXIF-, IPTC- és XMP-adatokból",
+      "import_hint": "Kedvencek, értékelések, válogatási jelölők, címkék és leírások importálása vizsgálat és frissítés során, a helyi módosítások megőrzésével."
     },
     "browse": {
       "section_album": "Albummappa",
@@ -1425,7 +1435,7 @@
         "Hely",
         "Kamera",
         "Objektív",
-        "Felvételi beállítások"
+        "Expozíció"
       ],
       "show_thumbnail_badges": "Bélyegképjelvények megjelenítése",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "5 csillagos értékelés",
         "edit_tags": "Címkék",
         "edit_collections": "Gyűjtemények",
-        "edit_comment": "Megjegyzés",
+        "edit_comment": "Leírás",
         "rotate": "Nézet forgatása jobbra",
         "rotate_counterclockwise": "Nézet forgatása balra",
         "thumbnail_increase": "Bélyegképméret növelése",
