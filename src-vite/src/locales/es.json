@@ -740,9 +740,9 @@
       "show_info": "Ver info",
       "remove_from_collection": "Quitar de la colección",
       "create_montage": "Crear collage",
-      "import_xmp": "Importar desde XMP",
-      "xmp_import_success": "Metadatos importados de {count} archivo(s) XMP",
-      "xmp_import_failed": "Error al importar XMP de {count} archivo(s)"
+      "save_xmp": "Guardar metadatos en XMP",
+      "xmp_save_success": "Metadatos XMP guardados para {count} archivo(s)",
+      "xmp_save_failed": "No se pudo guardar XMP para {count} archivo(s)"
     },
     "calendar": {
       "monthly": "Mensual",
@@ -1366,7 +1366,7 @@
       "preview_mode": "Modo de vista previa RAW",
       "section_xmp": "Archivos XMP",
       "xmp_import": "Importar metadatos XMP",
-      "xmp_import_hint": "Leer valoraciones, etiquetas, indicadores de selección y comentarios desde archivos .xmp"
+      "xmp_import_hint": "Importar archivos asociados y metadatos integrados compatibles al analizar y actualizar, conservando los cambios locales."
     },
     "browse": {
       "section_album": "Carpeta de álbum",

@@ -740,9 +740,9 @@
       "show_info": "Adatok megjelenítése",
       "remove_from_collection": "Eltávolítás a gyűjteményből",
       "create_montage": "Kollázs készítése",
-      "import_xmp": "Importálás XMP-ből",
-      "xmp_import_success": "Metaadatok importálva {count} XMP mellékfájlból",
-      "xmp_import_failed": "Az XMP importálása sikertelen {count} fájlnál"
+      "save_xmp": "Metaadatok mentése XMP-be",
+      "xmp_save_success": "XMP-metaadatok mentve {count} fájlhoz",
+      "xmp_save_failed": "Az XMP mentése sikertelen {count} fájlnál"
     },
     "calendar": {
       "monthly": "Havi",
@@ -1366,7 +1366,7 @@
       "preview_mode": "RAW-előnézet módja",
       "section_xmp": "XMP mellékfájlok",
       "xmp_import": "XMP metaadatok importálása",
-      "xmp_import_hint": "Értékelések, címkék, jelölők és megjegyzések beolvasása .xmp fájlokból"
+      "xmp_import_hint": "Kísérőfájlok és támogatott beágyazott metaadatok importálása kereséskor és frissítéskor, a helyi módosítások megőrzésével."
     },
     "browse": {
       "section_album": "Albummappa",

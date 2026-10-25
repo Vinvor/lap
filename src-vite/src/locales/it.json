@@ -740,9 +740,9 @@
       "show_info": "Mostra informazioni",
       "remove_from_collection": "Rimuovi dalla raccolta",
       "create_montage": "Crea collage",
-      "import_xmp": "Importa da XMP",
-      "xmp_import_success": "Metadati importati da {count} file sidecar XMP",
-      "xmp_import_failed": "Importazione XMP non riuscita per {count} file"
+      "save_xmp": "Salva metadati in XMP",
+      "xmp_save_success": "Metadati XMP salvati per {count} file",
+      "xmp_save_failed": "Salvataggio XMP non riuscito per {count} file"
     },
     "calendar": {
       "monthly": "Mensile",
@@ -1366,7 +1366,7 @@
       "preview_mode": "Modalità anteprima RAW",
       "section_xmp": "Sidecar XMP",
       "xmp_import": "Importa metadati XMP",
-      "xmp_import_hint": "Leggi valutazioni, tag, flag di selezione e commenti dai sidecar .xmp"
+      "xmp_import_hint": "Importa file associati e metadati incorporati supportati durante scansione e aggiornamento, conservando le modifiche locali."
     },
     "browse": {
       "section_album": "Cartella album",

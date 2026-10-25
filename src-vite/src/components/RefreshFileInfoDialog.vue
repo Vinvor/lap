@@ -68,7 +68,9 @@ onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
   // Sequential background commands bound memory and permit cancellation between
   // files. The backend also checks the library under its library-switch lock.
+  let batchId: number | undefined;
   try {
+    batchId = await invoke<number>('begin_file_refresh_batch', { libraryId: props.libraryId });
     for (const fileId of props.fileIds) {
       if (disposed || cancelled.value || libConfig._libraryId !== props.libraryId) {
         cancelled.value = true;
@@ -77,10 +79,10 @@ onMounted(async () => {
       try {
         const result = props.freeSpace
           ? await invoke<FileRefreshResult | null>('index_cloud_file', {
-              libraryId: props.libraryId, fileId,
+              libraryId: props.libraryId, fileId, batchId,
               thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions(),
             })
-          : await invoke<FileRefreshResult | null>('refresh_selected_file_info', { libraryId: props.libraryId, fileId });
+          : await invoke<FileRefreshResult | null>('refresh_selected_file_info', { libraryId: props.libraryId, fileId, batchId });
         if (result && props.freeSpace) result.release_requested ? releaseRequested.value++ : keptLocal.value++;
         if (result) {
           results.push(result);
@@ -97,7 +99,13 @@ onMounted(async () => {
       }
       processed.value++;
     }
+  } catch (error) {
+    lastError.value = String(error);
   } finally {
+    if (batchId !== undefined) {
+      try { await invoke('end_file_refresh_batch', { batchId }); }
+      catch (error) { console.error('Failed to release refresh index:', error); }
+    }
     try {
       if (!disposed && libConfig._libraryId === props.libraryId) await props.finishRefresh(results);
     } finally {

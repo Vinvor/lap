@@ -1,4 +1,4 @@
-//! XMP Sidecar Metadata Support (Read-Only Import).
+//! XMP sidecar import, non-destructive writeback, and local-edit protection.
 //!
 //! Handles discovery and namespace-aware, non-destructive parsing of `.xmp` sidecar
 //! files (compatible with darktable, Adobe Lightroom / Camera Raw, RapidRAW,
@@ -9,16 +9,24 @@
 //! | Lap Field | Canonical Namespace URI | XMP Property / Element | Mapping Rules |
 //! | :--- | :--- | :--- | :--- |
 //! | `afiles.rating` | `http://ns.adobe.com/xap/1.0/` | `xmp:Rating` (`xap:Rating`) | `0..=5` → `Some(0..=5)`; `""` → `Some(0)`; `-1` → `Some(0)` (and sets reject flag if unflagged); missing → `None` |
-//! | `afiles.culling_flag` | `http://ns.adobe.com/xmp/1.0/DynamicMedia/`<br>`http://darktable.sf.net/`<br>`http://ns.adobe.com/xap/1.0/` | `xmpDM:pick`<br>`darktable:rejected`<br>`xmp:Rating="-1"` / `xmp:Label` | `xmpDM:pick="1"` or `xmp:Label="Pick"\|"Select"` → `Some(1)` (Pick)<br>`xmpDM:pick="-1"` or `darktable:rejected="1"` or `xmp:Rating="-1"` or `xmp:Label="Reject"\|"Rejected"` → `Some(2)` (Reject)<br>`xmpDM:pick="0"` or `darktable:rejected="0"` → `Some(0)` (Unflagged)<br>missing → `None` |
+//! | `afiles.culling_flag` | `http://ns.adobe.com/xmp/1.0/DynamicMedia/`<br>`http://darktable.sf.net/`<br>`http://ns.adobe.com/xap/1.0/` | `xmpDM:pick` / `xmpDM:good`<br>`darktable:rejected`<br>`xmp:Rating="-1"` / `xmp:Label` | `xmpDM:pick="1"` or `xmp:Label="Pick"\|"Select"` → `Some(1)` (Pick)<br>`xmpDM:pick="-1"` or `darktable:rejected="1"` or `xmp:Rating="-1"` or `xmp:Label="Reject"\|"Rejected"` → `Some(2)` (Reject)<br>`xmpDM:pick="0"` or `darktable:rejected="0"` → `Some(0)` (Unflagged)<br>missing → `None` |
 //! | `atags` / `afile_tags` | `http://purl.org/dc/elements/1.1/`<br>`http://ns.adobe.com/lightroom/1.0/`<br>`http://www.digikam.org/ns/1.0/` | `dc:subject` (`rdf:Bag`)<br>`lr:hierarchicalSubject` (`rdf:Bag`)<br>`digiKam:TagsList` (`rdf:Seq`) | Deduplicated union preserving order; internal `darktable\|*` system tags excluded; empty container → `Some(vec![])`; missing → `None` |
 //! | `afiles.comments` | `http://purl.org/dc/elements/1.1/`<br>`http://ns.adobe.com/exif/1.0/`<br>`http://ns.adobe.com/photoshop/1.0/` | `dc:description` (`rdf:Alt`)<br>`exif:UserComment` (`rdf:Alt`)<br>`photoshop:Caption` | Priority: `dc:description` (`xml:lang="x-default"` preferred) → `exif:UserComment` → `photoshop:Caption`; empty element/attr → `Some("")`; missing → `None` |
 
+//! Existing LR/digiKam tag stores are synchronized with Lap's flat tag strings.
+//! A string such as `A|B|C` is preserved literally; hierarchy is not inferred.
+
+use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 use crate::t_sqlite::open_conn;
 
@@ -81,6 +89,8 @@ pub enum XmpImportMode {
     /// Fills empty fields and merges tags only when the corresponding field has
     /// not been edited locally. Explicit local clears are protected as well.
     RescanNonDestructive,
+    /// Explicit refresh bypasses fingerprints, preserving local edits.
+    RefreshNonDestructive,
     /// Used when the user explicitly selects "Import from XMP" from the context menu.
     /// Applies all `Some(...)` fields from the sidecar (including `Some(0)` or `Some("")` to clear),
     /// while leaving `None` (missing) fields untouched.
@@ -108,12 +118,81 @@ pub fn sidecar_scan(generation: i64) -> SidecarScan {
     SidecarScan(SCAN.with(|scan| scan.replace(Some(generation))))
 }
 
+type SharedRefreshIndex = std::sync::Arc<Mutex<ExportIndex>>;
+struct RefreshSession {
+    library: String,
+    index: SharedRefreshIndex,
+    touched: std::time::Instant,
+}
+static REFRESH_SESSIONS: std::sync::LazyLock<Mutex<HashMap<u64, RefreshSession>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static REFRESH_SERIAL: AtomicU64 = AtomicU64::new(1);
+thread_local! {
+    static REFRESH_INDEX: std::cell::RefCell<Option<SharedRefreshIndex>> = const { std::cell::RefCell::new(None) };
+}
+pub struct RefreshIndexScope(Option<SharedRefreshIndex>);
+impl Drop for RefreshIndexScope {
+    fn drop(&mut self) {
+        REFRESH_INDEX.with(|index| *index.borrow_mut() = self.0.take());
+    }
+}
+pub fn begin_refresh_batch(library: String) -> Result<u64, String> {
+    let mut sessions = REFRESH_SESSIONS.lock().map_err(|e| e.to_string())?;
+    // Reclaim abandoned windows; normal completion/cancellation explicitly ends.
+    sessions.retain(|_, session| session.touched.elapsed().as_secs() < 3600);
+    if sessions.len() >= 16 {
+        return Err("Too many metadata refresh batches".into());
+    }
+    let id = REFRESH_SERIAL.fetch_add(1, Ordering::Relaxed);
+    sessions.insert(
+        id,
+        RefreshSession {
+            library,
+            index: std::sync::Arc::new(Mutex::new(ExportIndex::default())),
+            touched: std::time::Instant::now(),
+        },
+    );
+    Ok(id)
+}
+pub fn end_refresh_batch(id: u64) {
+    if let Ok(mut sessions) = REFRESH_SESSIONS.lock() {
+        sessions.remove(&id);
+    }
+}
+pub fn refresh_index_scope(id: Option<u64>, library: &str) -> Result<RefreshIndexScope, String> {
+    let index = if let Some(id) = id {
+        let mut sessions = REFRESH_SESSIONS.lock().map_err(|e| e.to_string())?;
+        let session = sessions
+            .get_mut(&id)
+            .ok_or("Metadata refresh batch expired")?;
+        if session.library != library {
+            return Err("Library changed".into());
+        }
+        session.touched = std::time::Instant::now();
+        Some(session.index.clone())
+    } else {
+        None
+    };
+    Ok(RefreshIndexScope(
+        REFRESH_INDEX.with(|previous| previous.replace(index)),
+    ))
+}
+
 /// The photo name is case-sensitive; only the sidecar extension is folded.
 /// Duplicate extension spellings are resolved deterministically.
 pub fn find_xmp_sidecar(image_path: &Path) -> Option<PathBuf> {
     let parent = image_path.parent().unwrap_or(Path::new("."));
     let file_name = image_path.file_name()?.to_str()?;
     let stem = image_path.file_stem()?.to_str()?;
+    if let Some(index) = REFRESH_INDEX.with(|index| index.borrow().clone()) {
+        let mut cache = index.lock().ok()?;
+        let directory = cache.directory(parent).ok()?;
+        return directory
+            .sidecars
+            .get(file_name)
+            .or_else(|| directory.sidecars.get(stem))
+            .cloned();
+    }
     INDEX.with(|cache| {
         let generation = SCAN.with(|scan| scan.get());
         let mut cache = cache.borrow_mut();
@@ -142,38 +221,6 @@ pub fn find_xmp_sidecar(image_path: &Path) -> Option<PathBuf> {
         let names = &cache.as_ref()?.2;
         names.get(file_name).or_else(|| names.get(stem)).cloned()
     })
-}
-
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct XmpBatchResult {
-    pub imported_ids: Vec<i64>,
-    pub skipped_ids: Vec<i64>,
-    pub failures: Vec<XmpImportFailure>,
-}
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct XmpImportFailure {
-    pub file_id: i64,
-    pub path: String,
-    pub error: String,
-}
-pub fn import_batch(files: &[(i64, String)], conn: &Connection) -> XmpBatchResult {
-    static GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
-    let _scan = sidecar_scan(GENERATION.fetch_sub(1, Ordering::Relaxed));
-    let mut result = XmpBatchResult::default();
-    for (id, path) in files {
-        match import_xmp_for_file_with_conn(*id, path, conn, XmpImportMode::ManualOverwrite) {
-            Ok(true) => result.imported_ids.push(*id),
-            Ok(false) => result.skipped_ids.push(*id),
-            Err(error) => result.failures.push(XmpImportFailure {
-                file_id: *id,
-                path: path.clone(),
-                error,
-            }),
-        }
-    }
-    result
 }
 
 /// Reads and parses an XMP sidecar file, skipping cloud-only (unhydrated) placeholders.
@@ -221,28 +268,17 @@ pub fn parse_xmp_str(content: &str) -> Result<XmpMetadata, String> {
             }
         }
     }
-    meta.culling_flag = value(NS_XMP_DM, "pick")
-        .and_then(|v| match v.trim() {
-            "1" => Some(1),
-            "-1" => Some(2),
-            "0" | "" => Some(0),
-            _ => None,
-        })
-        .or_else(|| {
-            value(NS_DARKTABLE, "rejected").and_then(|v| match v.trim() {
-                "1" | "true" => Some(2),
-                "0" | "false" | "" => Some(0),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            value(NS_XMP, "Label").and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
-                "pick" | "select" => Some(1),
-                "reject" | "rejected" => Some(2),
-                _ => None,
-            })
-        })
-        .or(if rejected { Some(2) } else { None });
+    let pick = value(NS_XMP_DM, "pick");
+    let good = value(NS_XMP_DM, "good");
+    let rejected_value = value(NS_DARKTABLE, "rejected");
+    let label = value(NS_XMP, "Label");
+    meta.culling_flag = culling_from_values(
+        pick.as_deref(),
+        good.as_deref(),
+        rejected_value.as_deref(),
+        label.as_deref(),
+        if rejected { Some(-1) } else { meta.rating },
+    );
     let mut seen = HashSet::new();
     for node in &properties {
         if matches!(
@@ -274,10 +310,82 @@ pub fn parse_xmp_str(content: &str) -> Result<XmpMetadata, String> {
     Ok(meta)
 }
 
+/// Standard and referenced extended XMP are one logical metadata record.
+/// Resolve namespace-aware properties before applying the shared flag precedence.
+pub(crate) fn culling_from_packets(packets: &[String]) -> Option<i32> {
+    let roots: Vec<_> = packets
+        .iter()
+        .filter_map(|packet| parse_xml(packet).ok())
+        .collect();
+    let mut properties = Vec::new();
+    // Referenced extended packets follow the standard packet and override it.
+    // Keep the existing first-property rule within each individual packet.
+    for root in roots.iter().rev() {
+        collect_properties(root, &mut properties);
+    }
+    let value = |uri: &str, name: &str| {
+        properties
+            .iter()
+            .find(|node| node.uri == uri && node.name == name)
+            .map(|node| node.value())
+    };
+    let pick = value(NS_XMP_DM, "pick");
+    let good = value(NS_XMP_DM, "good");
+    let rejected = value(NS_DARKTABLE, "rejected");
+    let label = value(NS_XMP, "Label");
+    let rating = value(NS_XMP, "Rating").and_then(|v| v.trim().parse().ok());
+    culling_from_values(
+        pick.as_deref(),
+        good.as_deref(),
+        rejected.as_deref(),
+        label.as_deref(),
+        rating,
+    )
+}
+
 /// Returns `true` for internal darktable / host system tags that should not be imported as user tags.
 fn is_internal_system_tag(tag: &str) -> bool {
     let lower = tag.trim().to_ascii_lowercase();
     lower.starts_with("darktable|") || lower == "darktable"
+}
+
+/// Shared precedence for sidecar and embedded XMP. Explicit unflagged wins
+/// over legacy reject markers. Good=false means Reject, never Unflagged.
+pub(crate) fn culling_from_values(
+    pick: Option<&str>,
+    good: Option<&str>,
+    rejected: Option<&str>,
+    label: Option<&str>,
+    rating: Option<i32>,
+) -> Option<i32> {
+    pick.and_then(|v| match v.trim() {
+        "1" => Some(1),
+        "-1" => Some(2),
+        "0" | "" => Some(0),
+        _ => None,
+    })
+    .or_else(|| {
+        good.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(1),
+            "false" | "0" => Some(2),
+            _ => None,
+        })
+    })
+    .or_else(|| {
+        rejected.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" => Some(2),
+            "false" | "0" | "" => Some(0),
+            _ => None,
+        })
+    })
+    .or_else(|| {
+        label.and_then(|v| match v.trim().to_ascii_lowercase().as_str() {
+            "pick" | "select" => Some(1),
+            "reject" | "rejected" => Some(2),
+            _ => None,
+        })
+    })
+    .or(if rating == Some(-1) { Some(2) } else { None })
 }
 
 // ---------------------------------------------------------------------------
@@ -304,14 +412,17 @@ pub fn import_xmp_for_file_with_conn(
         .transpose()
         .map_err(|e| e.to_string())?;
     let fingerprint = format!(
-        "embedded-v1:{}:{:?}:{}:{:?}:{:?}",
+        "embedded-v2:{}:{:?}:{}:{:?}:{:?}",
         file_path,
         media_info.as_ref().and_then(|info| info.modified().ok()),
         media_info.map(|info| info.len()).unwrap_or(0),
         sidecar_path,
         sidecar_info.map(|info| (info.modified().ok(), info.len()))
     );
-    if mode != XmpImportMode::ManualOverwrite {
+    if !matches!(
+        mode,
+        XmpImportMode::ManualOverwrite | XmpImportMode::RefreshNonDestructive
+    ) {
         let previous: Option<String> = conn
             .query_row(
                 "SELECT fingerprint FROM axmp_imports WHERE file_id = ?1",
@@ -345,6 +456,24 @@ pub fn import_xmp_for_file_with_conn(
     apply_with_state(file_id, &meta, conn, mode, Some(&fingerprint))
 }
 
+/// Scanner-derived descriptions preserve local edits and explicit clears.
+pub fn import_scanned_description(
+    file_id: i64,
+    description: String,
+    conn: &Connection,
+) -> Result<bool, String> {
+    apply_with_state(
+        file_id,
+        &XmpMetadata {
+            description: Some(description),
+            ..Default::default()
+        },
+        conn,
+        XmpImportMode::RescanNonDestructive,
+        None,
+    )
+}
+
 /// Installs durable import state and observes local edits, including clears.
 /// Import writes restore the prior dirty mask within the same transaction.
 pub fn initialize(conn: &Connection) -> Result<(), String> {
@@ -370,6 +499,18 @@ pub fn initialize(conn: &Connection) -> Result<(), String> {
         INSERT INTO axmp_imports(file_id, dirty) SELECT {row}.file_id, 8 WHERE EXISTS(SELECT 1 FROM afiles WHERE id = {row}.file_id)
         ON CONFLICT(file_id) DO UPDATE SET dirty = dirty | 8; END;" )).map_err(|e| e.to_string())?;
     }
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS axmp_local_tag_name AFTER UPDATE OF name ON atags
+        WHEN NEW.name IS NOT OLD.name BEGIN
+        INSERT INTO axmp_imports(file_id,dirty) SELECT file_id,8 FROM afile_tags WHERE tag_id=NEW.id
+        ON CONFLICT(file_id) DO UPDATE SET dirty=dirty|8; END;",
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_atags_name_nocase ON atags(name COLLATE NOCASE)",
+    )
+    .map_err(|e| e.to_string())?;
+    remove_legacy_auto_writeback(conn)?;
     Ok(())
 }
 
@@ -423,7 +564,9 @@ fn apply_fields(
         let clamped = rating.clamp(0, 5);
         let should_update = match mode {
             XmpImportMode::InitialScan => clamped > 0,
-            XmpImportMode::RescanNonDestructive => dirty & 1 == 0 && db_rating == 0 && clamped > 0,
+            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
+                dirty & 1 == 0 && db_rating == 0 && clamped > 0
+            }
             XmpImportMode::ManualOverwrite => clamped != db_rating,
         };
         if should_update {
@@ -440,7 +583,7 @@ fn apply_fields(
         let clamped = flag.clamp(0, 2);
         let should_update = match mode {
             XmpImportMode::InitialScan => clamped > 0,
-            XmpImportMode::RescanNonDestructive => {
+            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
                 dirty & 2 == 0 && db_culling_flag == 0 && clamped > 0
             }
             XmpImportMode::ManualOverwrite => clamped != db_culling_flag,
@@ -461,7 +604,7 @@ fn apply_fields(
 
         let should_update = match mode {
             XmpImportMode::InitialScan => !trimmed.is_empty(),
-            XmpImportMode::RescanNonDestructive => {
+            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive => {
                 dirty & 4 == 0 && db_comment_empty && !trimmed.is_empty()
             }
             XmpImportMode::ManualOverwrite => true,
@@ -482,7 +625,11 @@ fn apply_fields(
 
     // 4. Keywords / Tags
     if let Some(ref tags) = meta.tags {
-        if mode == XmpImportMode::RescanNonDestructive && dirty & 8 != 0 {
+        if matches!(
+            mode,
+            XmpImportMode::RescanNonDestructive | XmpImportMode::RefreshNonDestructive
+        ) && dirty & 8 != 0
+        {
             return Ok(true);
         }
         if mode == XmpImportMode::ManualOverwrite {
@@ -600,9 +747,34 @@ impl XmlNode {
     }
 }
 fn collect_properties<'a>(node: &'a XmlNode, out: &mut Vec<&'a XmlNode>) {
-    if node.uri == NS_RDF && node.name == "Description" {
-        out.extend(node.attributes.iter());
-        out.extend(node.children.iter());
+    // Retain support for a standalone RDF Description document.
+    if node.name.is_empty() && node.children.len() == 1 {
+        let root = &node.children[0];
+        if root.uri == NS_RDF && root.name == "Description" {
+            if !root.attributes.iter().any(|a| {
+                a.uri == NS_RDF && (a.name == "nodeID" || (a.name == "about" && !a.text.is_empty()))
+            }) {
+                out.extend(root.attributes.iter());
+                out.extend(root.children.iter());
+            }
+            return;
+        }
+    }
+    if node.uri == NS_RDF && node.name == "RDF" {
+        for description in &node.children {
+            if description.uri != NS_RDF || description.name != "Description" {
+                continue;
+            }
+            // Only the document's photo subject, not nested/identified resources.
+            if description.attributes.iter().any(|a| {
+                a.uri == NS_RDF && (a.name == "nodeID" || (a.name == "about" && !a.text.is_empty()))
+            }) {
+                continue;
+            }
+            out.extend(description.attributes.iter());
+            out.extend(description.children.iter());
+        }
+        return;
     }
     for child in &node.children {
         collect_properties(child, out);
@@ -722,9 +894,691 @@ fn parse_xml(content: &str) -> Result<XmlNode, String> {
     Ok(stack.pop().unwrap())
 }
 
+// ---------------------------------------------------------------------------
+// Non-destructive sidecar writeback (no media writer or EXIF backend)
+// ---------------------------------------------------------------------------
+
+static SERIAL: AtomicU64 = AtomicU64::new(0);
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+const ALL: i32 = 1 | 2 | 4 | 8;
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchResult {
+    pub saved_ids: Vec<i64>,
+    pub failures: Vec<Failure>,
+}
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Failure {
+    pub file_id: i64,
+    pub error: String,
+}
+
+/// Remove the experimental automatic-export schema on existing libraries.
+/// Local-edit protection in axmp_imports is retained for automatic import.
+fn remove_legacy_auto_writeback(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "DROP TRIGGER IF EXISTS axmp_write_rating;
+        DROP TRIGGER IF EXISTS axmp_write_culling_flag;
+        DROP TRIGGER IF EXISTS axmp_write_comments;
+        DROP TRIGGER IF EXISTS axmp_write_tags_INSERT;
+        DROP TRIGGER IF EXISTS axmp_write_tags_DELETE;
+        DROP TRIGGER IF EXISTS axmp_write_tag_name;
+        DROP TABLE IF EXISTS axmp_writes;
+        DROP TABLE IF EXISTS axmp_write_control;",
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn namespace(result: ResolveResult<'_>) -> Result<String, String> {
+    match result {
+        ResolveResult::Bound(n) => Ok(String::from_utf8_lossy(n.as_ref()).into()),
+        ResolveResult::Unbound => Ok(String::new()),
+        ResolveResult::Unknown(_) => Err("Unbound XML namespace".into()),
+    }
+}
+#[derive(Default)]
+struct Node {
+    uri: String,
+    name: String,
+    start: usize,
+    open_end: usize,
+    close: usize,
+    end: usize,
+    parent: Option<usize>,
+    lang: Option<String>,
+    about: Option<String>,
+}
+fn escape(s: &str) -> String {
+    quick_xml::escape::escape(s).into_owned()
+}
+
+/// Patch owned properties while preserving unrelated elements and language variants.
+fn culling_property(uri: &str, name: &[u8], value: &str) -> bool {
+    (uri == NS_XMP_DM && matches!(name, b"pick" | b"good"))
+        || (uri == NS_DARKTABLE && name == b"rejected")
+        || (uri == NS_XMP
+            && name == b"Label"
+            && matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "pick" | "select" | "reject" | "rejected"
+            ))
+}
+
+fn property_text(xml: &str, node: &Node) -> Result<String, String> {
+    // Text/CDATA scalar properties only. Other managed properties do not need
+    // this value, and their nested XML must not be interpreted as a flag.
+    if node.uri != NS_XMP || node.name != "Label" {
+        return Ok(String::new());
+    }
+    let mut reader = quick_xml::Reader::from_str(&xml[node.start..node.end]);
+    let mut text = String::new();
+    loop {
+        match reader.read_event().map_err(|e| e.to_string())? {
+            Event::Text(e) => text.push_str(&e.unescape().map_err(|e| e.to_string())?),
+            Event::CData(e) => text.push_str(&e.decode().map_err(|e| e.to_string())?),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(text)
+}
+
+fn tag_property(uri: &str, name: &[u8]) -> bool {
+    matches!(
+        (uri, name),
+        (NS_DC, b"subject") | (NS_LR, b"hierarchicalSubject") | (NS_DIGIKAM, b"TagsList")
+    )
+}
+
+fn merge_with_culling(
+    xml: &str,
+    rating: i32,
+    culling: i32,
+    tags: &[String],
+    description: &str,
+    mask: i32,
+) -> Result<String, String> {
+    parse_xmp_str(xml)?; // reuse bounded, DTD-free validation
+    // Rating and culling are one export unit: normalize legacy Rating=-1
+    // while preserving the independent Lap star rating and current flag.
+    let mask = if mask & 3 != 0 { mask | 3 } else { mask };
+    let mut reader = NsReader::from_str(xml);
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut patches: Vec<(usize, usize, String)> = Vec::new();
+    let mut hierarchy = [false; 2];
+    let mut had_darktable_rejected = false;
+    loop {
+        let start = reader.buffer_position() as usize;
+        let event = reader.read_event().map_err(|e| e.to_string())?;
+        let end = reader.buffer_position() as usize;
+        match event {
+            Event::Start(ref e) | Event::Empty(ref e) => {
+                let (ns, local) = reader.resolve_element(e.name());
+                let mut node = Node {
+                    uri: namespace(ns)?,
+                    name: String::from_utf8_lossy(local.as_ref()).into(),
+                    start,
+                    open_end: end,
+                    close: start,
+                    end,
+                    parent: stack.last().copied(),
+                    ..Default::default()
+                };
+                let mut filtered = e.to_owned();
+                filtered.clear_attributes();
+                let mut changed = false;
+                let mut retained_property = false;
+                for a in e.attributes() {
+                    let a = a.map_err(|e| e.to_string())?;
+                    let (ns, local) = reader.resolve_attribute(a.key);
+                    let uri = namespace(ns)?;
+                    let name = String::from_utf8_lossy(local.as_ref());
+                    if uri == NS_RDF && name == "about" {
+                        node.about = Some(
+                            a.decode_and_unescape_value(reader.decoder())
+                                .map_err(|e| e.to_string())?
+                                .into_owned(),
+                        );
+                    }
+                    if uri == "http://www.w3.org/XML/1998/namespace" && name == "lang" {
+                        node.lang = Some(
+                            a.decode_and_unescape_value(reader.decoder())
+                                .map_err(|e| e.to_string())?
+                                .into_owned(),
+                        );
+                    }
+                }
+                // Strip managed shorthand attributes, only on the photo's Description.
+                if node.uri == NS_RDF
+                    && node.name == "Description"
+                    && node
+                        .parent
+                        .is_some_and(|i| nodes[i].uri == NS_RDF && nodes[i].name == "RDF")
+                    && node.about.as_deref().unwrap_or("").is_empty()
+                {
+                    filtered.clear_attributes();
+                    for a in e.attributes() {
+                        let a = a.map_err(|e| e.to_string())?;
+                        let (ns, local) = reader.resolve_attribute(a.key);
+                        let uri = namespace(ns)?;
+                        let own = (uri == NS_XMP && local.as_ref() == b"Rating" && mask & 1 != 0)
+                            || (tag_property(&uri, local.as_ref()) && mask & 8 != 0)
+                            || (uri == NS_DC && local.as_ref() == b"description" && mask & 4 != 0)
+                            || (mask & 2 != 0
+                                && culling_property(
+                                    &uri,
+                                    local.as_ref(),
+                                    &a.decode_and_unescape_value(reader.decoder())
+                                        .map_err(|e| e.to_string())?,
+                                ));
+                        if own {
+                            hierarchy[0] |=
+                                uri == NS_LR && local.as_ref() == b"hierarchicalSubject";
+                            hierarchy[1] |= uri == NS_DIGIKAM && local.as_ref() == b"TagsList";
+                            had_darktable_rejected |=
+                                uri == NS_DARKTABLE && local.as_ref() == b"rejected";
+                            changed = true;
+                        } else {
+                            // Attribute already contains validated, escaped source bytes.
+                            // Preserve those bytes, including namespace declarations.
+                            retained_property |= !(a.key.as_ref() == b"xmlns"
+                                || a.key.as_ref().starts_with(b"xmlns:")
+                                || (uri == NS_RDF && local.as_ref() == b"about"));
+                            filtered.push_attribute(a);
+                        }
+                    }
+                    if changed {
+                        let mut writer = quick_xml::Writer::new(Vec::new());
+                        writer
+                            .write_event(if matches!(event, Event::Empty(_)) {
+                                Event::Empty(filtered)
+                            } else {
+                                Event::Start(filtered)
+                            })
+                            .map_err(|e| e.to_string())?;
+                        patches.push((
+                            start,
+                            end,
+                            if matches!(event, Event::Empty(_)) && !retained_property {
+                                String::new()
+                            } else {
+                                String::from_utf8(writer.into_inner()).map_err(|e| e.to_string())?
+                            },
+                        ));
+                    }
+                }
+                nodes.push(node);
+                let index = nodes.len() - 1;
+                if matches!(event, Event::Start(_)) {
+                    stack.push(index);
+                }
+            }
+            Event::End(_) => {
+                let index = stack.pop().ok_or("Unexpected closing tag")?;
+                nodes[index].close = start;
+                nodes[index].end = end;
+            }
+            Event::PI(ref e) if e.target() == b"xpacket" => {
+                let content = std::str::from_utf8(e.content()).map_err(|e| e.to_string())?;
+                let pseudo = format!("<packet {content}/>");
+                let mut pi_reader = quick_xml::Reader::from_str(&pseudo);
+                if let Event::Empty(packet) = pi_reader.read_event().map_err(|e| e.to_string())? {
+                    for attr in packet.attributes() {
+                        let attr = attr.map_err(|e| e.to_string())?;
+                        if attr.key.as_ref() == b"end" && attr.value.as_ref() == b"r" {
+                            return Err("XMP packet is marked read-only".into());
+                        }
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let rdf: Vec<_> = nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.uri == NS_RDF && n.name == "RDF")
+        .collect();
+    if rdf.len() != 1 {
+        return Err("Expected one RDF metadata container".into());
+    }
+    let (rdf_id, rdf) = rdf[0];
+    if nodes.iter().any(|n| {
+        n.parent == Some(rdf_id)
+            && n.uri == NS_RDF
+            && n.name == "Description"
+            && !n.about.as_deref().unwrap_or("").is_empty()
+    }) {
+        return Err(
+            "Named RDF subjects require manual resolution; original sidecar retained".into(),
+        );
+    }
+    let mut found_description = false;
+    for (id, n) in nodes.iter().enumerate() {
+        let Some(parent) = n.parent else { continue };
+        let p = &nodes[parent];
+        if p.uri != NS_RDF
+            || p.name != "Description"
+            || p.parent != Some(rdf_id)
+            || !p.about.as_deref().unwrap_or("").is_empty()
+        {
+            continue;
+        }
+        if (mask & 1 != 0 && n.uri == NS_XMP && n.name == "Rating")
+            || (mask & 8 != 0 && tag_property(&n.uri, n.name.as_bytes()))
+            || (mask & 2 != 0
+                && culling_property(&n.uri, n.name.as_bytes(), &property_text(xml, n)?))
+        {
+            had_darktable_rejected |= n.uri == NS_DARKTABLE && n.name == "rejected";
+            hierarchy[0] |= n.uri == NS_LR && n.name == "hierarchicalSubject";
+            hierarchy[1] |= n.uri == NS_DIGIKAM && n.name == "TagsList";
+            patches.push((n.start, n.end, String::new()));
+        }
+        if mask & 4 != 0 && n.uri == NS_DC && n.name == "description" {
+            if found_description {
+                return Err("Multiple description properties require manual resolution".into());
+            }
+            found_description = true;
+            let alts: Vec<_> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.parent == Some(id) && a.uri == NS_RDF && a.name == "Alt")
+                .collect();
+            if alts.len() == 1 && alts[0].1.open_end == alts[0].1.end {
+                // A self-closing Alt is a valid empty language container.
+                let alt = alts[0].1;
+                patches.push((
+                    alt.start,
+                    alt.end,
+                    format!(
+                        "<rdf:Alt xmlns:rdf=\"{NS_RDF}\"><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt>",
+                        escape(description)
+                    ),
+                ));
+            } else if alts.len() == 1 {
+                let (alt_id, alt) = alts[0];
+                for li in nodes.iter().filter(|li| {
+                    li.parent == Some(alt_id)
+                        && li.uri == NS_RDF
+                        && li.name == "li"
+                        && li.lang.as_deref() == Some("x-default")
+                }) {
+                    patches.push((li.start, li.end, String::new()));
+                }
+                patches.push((
+                    alt.close,
+                    alt.close,
+                    format!(
+                        "<rdf:li xmlns:rdf=\"{NS_RDF}\" xml:lang=\"x-default\">{}</rdf:li>",
+                        escape(description)
+                    ),
+                ));
+            } else if nodes.iter().any(|c| c.parent == Some(id)) {
+                return Err("Unsupported description structure; original sidecar retained".into());
+            } else {
+                patches.push((n.start, n.end, description_xml(description)));
+            }
+        }
+    }
+    let mut properties = String::new();
+    if mask & 1 != 0 {
+        properties += &format!("<xmp:Rating>{}</xmp:Rating>", rating.clamp(0, 5));
+    }
+    if mask & 2 != 0 {
+        let pick = match culling {
+            1 => 1,
+            2 => -1,
+            _ => 0,
+        };
+        properties += &format!("<xmpDM:pick>{pick}</xmpDM:pick>");
+        if culling == 1 || culling == 2 {
+            properties += &format!(
+                "<xmpDM:good>{}</xmpDM:good>",
+                if culling == 1 { "True" } else { "False" }
+            );
+        }
+        if had_darktable_rejected {
+            properties += &format!(
+                "<darktable:rejected>{}</darktable:rejected>",
+                if culling == 2 { 1 } else { 0 }
+            );
+        }
+    }
+    if mask & 8 != 0 {
+        properties += "<dc:subject><rdf:Bag>";
+        for tag in tags {
+            properties += &format!("<rdf:li>{}</rdf:li>", escape(tag));
+        }
+        properties += "</rdf:Bag></dc:subject>";
+        for (present, prefix, uri, property, container) in [
+            (hierarchy[0], "lr", NS_LR, "hierarchicalSubject", "Bag"),
+            (hierarchy[1], "digiKam", NS_DIGIKAM, "TagsList", "Seq"),
+        ] {
+            if present {
+                properties +=
+                    &format!("<{prefix}:{property} xmlns:{prefix}=\"{uri}\"><rdf:{container}>");
+                for tag in tags {
+                    properties += &format!("<rdf:li>{}</rdf:li>", escape(tag));
+                }
+                properties += &format!("</rdf:{container}></{prefix}:{property}>");
+            }
+        }
+    }
+    if mask & 4 != 0 && !found_description {
+        properties += &description_xml(description);
+    }
+    let addition = format!(
+        "<rdf:Description xmlns:rdf=\"{NS_RDF}\" xmlns:xmp=\"{NS_XMP}\" xmlns:dc=\"{NS_DC}\" xmlns:xmpDM=\"{NS_XMP_DM}\" xmlns:darktable=\"{NS_DARKTABLE}\" rdf:about=\"\">{properties}</rdf:Description>"
+    );
+    if rdf.open_end == rdf.end {
+        // empty RDF element
+        let opening = xml[rdf.start..rdf.end]
+            .trim_end_matches('>')
+            .trim_end_matches('/');
+        let qname = xml[rdf.start + 1..rdf.end]
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .ok_or("Invalid RDF name")?;
+        patches.push((
+            rdf.start,
+            rdf.end,
+            format!("{opening}>{addition}</{qname}>"),
+        ));
+    } else {
+        patches.push((rdf.close, rdf.close, addition));
+    }
+    patches.sort_by_key(|p| (p.0, p.1));
+    let mut out = String::new();
+    let mut cursor = 0;
+    for (start, end, value) in patches {
+        if start < cursor {
+            return Err("Overlapping XMP properties".into());
+        }
+        out += &xml[cursor..start];
+        out += &value;
+        cursor = end;
+    }
+    out += &xml[cursor..];
+    parse_xmp_str(&out)?;
+    Ok(out)
+}
+fn description_xml(value: &str) -> String {
+    format!(
+        "<dc:description xmlns:dc=\"{NS_DC}\" xmlns:rdf=\"{NS_RDF}\"><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></dc:description>",
+        escape(value)
+    )
+}
+
+fn bounded_read(path: &Path) -> Result<Vec<u8>, String> {
+    let meta = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.file_type().is_symlink() || crate::t_utils::is_cloud_only(&meta) {
+        return Err("Sidecar is not an available regular local file".into());
+    }
+    if meta.permissions().readonly() {
+        return Err("Sidecar is read-only".into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("XMP exceeds 16 MiB".into());
+    }
+    Ok(bytes)
+}
+
+#[derive(Default)]
+struct ExportDirectory {
+    sidecars: HashMap<String, PathBuf>,
+    media_stems: HashMap<std::ffi::OsString, usize>,
+}
+
+impl ExportDirectory {
+    fn insert_sidecar(&mut self, path: &Path) {
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            return;
+        };
+        let chosen = self
+            .sidecars
+            .entry(name.to_owned())
+            .or_insert_with(|| path.to_path_buf());
+        if path < chosen.as_path() {
+            *chosen = path.to_path_buf();
+        }
+    }
+
+    fn read(parent: &Path) -> Result<Self, String> {
+        let mut index = Self::default();
+        for entry in fs::read_dir(parent).map_err(|e| e.to_string())? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+            {
+                if path.is_file() {
+                    index.insert_sidecar(&path);
+                }
+            } else if path.extension().is_some() {
+                if let Some(stem) = path.file_stem() {
+                    *index.media_stems.entry(stem.to_owned()).or_default() += 1;
+                }
+            }
+        }
+        Ok(index)
+    }
+}
+
+/// Scoped to one explicit export batch; directories may be interleaved.
+#[derive(Default)]
+struct ExportIndex(HashMap<PathBuf, Result<ExportDirectory, String>>);
+impl ExportIndex {
+    fn directory(&mut self, parent: &Path) -> Result<&mut ExportDirectory, String> {
+        self.0
+            .entry(parent.to_path_buf())
+            .or_insert_with(|| ExportDirectory::read(parent))
+            .as_mut()
+            .map_err(|e| e.clone())
+    }
+    fn published(&mut self, path: &Path) {
+        if let Some(Ok(directory)) = path.parent().and_then(|p| self.0.get_mut(p)) {
+            directory.insert_sidecar(path);
+        }
+    }
+}
+
+fn destination(media: &Path, cache: &mut ExportIndex) -> Result<PathBuf, String> {
+    let parent = media.parent().ok_or("Missing parent folder")?;
+    let file = media
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid media filename")?;
+    let stem = media
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or("Invalid media filename")?;
+    let directory = cache.directory(parent)?;
+    let canonical = parent.join(format!("{file}.xmp"));
+    if let Some(existing) = directory.sidecars.get(file) {
+        return Ok(existing.clone());
+    }
+    let Some(existing) = directory.sidecars.get(stem) else {
+        return Ok(canonical);
+    };
+    // Cache the RAW/JPEG shared-stem check together with sidecar discovery.
+    if directory
+        .media_stems
+        .get(std::ffi::OsStr::new(stem))
+        .copied()
+        .unwrap_or(0)
+        > 1
+    {
+        return Err("The stem-only XMP is shared by multiple files; use a file-specific sidecar before saving".into());
+    }
+    Ok(existing.clone())
+}
+
+fn write_one(conn: &Connection, file_id: i64, cache: &mut ExportIndex) -> Result<(), String> {
+    // A consistent catalog snapshot for this explicit manual export.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (folder, name, rating, culling, description): (String, String, i32, i32, String) = tx
+        .query_row("SELECT f.path,a.name,COALESCE(a.rating,0),COALESCE(a.culling_flag,0),COALESCE(a.comments,'') FROM afiles a JOIN afolders f ON f.id=a.folder_id WHERE a.id=?1",
+            [file_id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))
+        .map_err(|e|e.to_string())?;
+    let tags: Vec<String> = {
+        let mut stmt=tx.prepare("SELECT t.name FROM atags t JOIN afile_tags ft ON ft.tag_id=t.id WHERE ft.file_id=?1 ORDER BY t.name COLLATE NOCASE,t.id").map_err(|e|e.to_string())?;
+        let rows = stmt
+            .query_map([file_id], |r| r.get(0))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    let mut components = Path::new(&name).components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err("Invalid catalog filename".into());
+    }
+    let media_path = Path::new(&folder).join(&name);
+    let media = media_path.as_path();
+    let meta = fs::metadata(media).map_err(|e| e.to_string())?;
+    if !meta.is_file() || crate::t_utils::is_cloud_only(&meta) {
+        return Err("Original media is unavailable locally".into());
+    }
+    let dest = destination(media, cache)?;
+    let before = match fs::symlink_metadata(&dest) {
+        Ok(_) => Some(bounded_read(&dest)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    let xml = match before.as_deref() {
+        Some(b) => std::str::from_utf8(b)
+            .map_err(|e| e.to_string())?
+            .to_owned(),
+        None => format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"{NS_RDF}\"></rdf:RDF></x:xmpmeta>"
+        ),
+    };
+    let output = merge_with_culling(&xml, rating, culling, &tags, &description, ALL)?;
+    let temp = dest.with_file_name(format!(
+        ".lap-xmp-{}-{}.tmp",
+        std::process::id(),
+        SERIAL.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        file.write_all(output.as_bytes())
+            .map_err(|e| e.to_string())?;
+        if before.is_some() {
+            file.set_permissions(
+                fs::metadata(&dest)
+                    .map_err(|e| e.to_string())?
+                    .permissions(),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        file.sync_all().map_err(|e| e.to_string())?;
+        drop(file);
+        publish(&temp, &dest, before.as_deref())?;
+        Ok(())
+    })();
+    let _ = fs::remove_file(&temp);
+    if result.is_ok() {
+        cache.published(&dest);
+    }
+    result
+}
+
+/// Optimistic external-change check immediately before publishing the complete packet.
+fn publish(temp: &Path, dest: &Path, before: Option<&[u8]>) -> Result<(), String> {
+    if let Some(original) = before {
+        if bounded_read(dest)? != original {
+            return Err(
+                "Sidecar changed externally during export; retry after reviewing it".into(),
+            );
+        }
+        fs::rename(temp, dest).map_err(|e| e.to_string())?;
+    } else {
+        crate::t_batch_rename::rename_exclusive(temp, dest)?;
+    }
+    Ok(())
+}
+
+fn failure(conn: &Connection, file_id: i64, error: String) -> Failure {
+    let name: String = conn
+        .query_row("SELECT name FROM afiles WHERE id=?1", [file_id], |r| {
+            r.get(0)
+        })
+        .unwrap_or_else(|_| format!("File #{file_id}"));
+    Failure {
+        file_id,
+        error: format!("{name}: {error}"),
+    }
+}
+
+pub fn save_batch(conn: &Connection, ids: &[i64]) -> BatchResult {
+    let mut result = BatchResult::default();
+    let Ok(_guard) = WRITE_LOCK.lock() else {
+        result.failures.push(Failure {
+            file_id: 0,
+            error: "XMP writer unavailable".into(),
+        });
+        return result;
+    };
+    let mut cache = ExportIndex::default();
+    for &id in ids {
+        match write_one(conn, id, &mut cache) {
+            Ok(()) => result.saved_ids.push(id),
+            Err(error) => result.failures.push(failure(conn, id, error)),
+        }
+    }
+    result
+}
+
 #[cfg(test)]
-mod tests {
+mod import_tests {
     use super::*;
+    #[derive(Debug, Default, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct XmpBatchResult {
+        pub imported_ids: Vec<i64>,
+        pub skipped_ids: Vec<i64>,
+        pub failures: Vec<XmpImportFailure>,
+    }
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct XmpImportFailure {
+        pub file_id: i64,
+        pub path: String,
+        pub error: String,
+    }
+    fn import_batch(files: &[(i64, String)], conn: &Connection) -> XmpBatchResult {
+        static GENERATION: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+        let _scan = sidecar_scan(GENERATION.fetch_sub(1, Ordering::Relaxed));
+        let mut result = XmpBatchResult::default();
+        for (id, path) in files {
+            match import_xmp_for_file_with_conn(*id, path, conn, XmpImportMode::ManualOverwrite) {
+                Ok(true) => result.imported_ids.push(*id),
+                Ok(false) => result.skipped_ids.push(*id),
+                Err(error) => result.failures.push(XmpImportFailure {
+                    file_id: *id,
+                    path: path.clone(),
+                    error,
+                }),
+            }
+        }
+        result
+    }
+
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_temp_test_dir(label: &str) -> PathBuf {
@@ -1328,6 +2182,773 @@ mod tests {
                 .get::<_, i32>(0))
                 .unwrap(),
             0
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    fn merge(
+        xml: &str,
+        rating: i32,
+        tags: &[String],
+        description: &str,
+        mask: i32,
+    ) -> Result<String, String> {
+        merge_with_culling(xml, rating, 0, tags, description, mask)
+    }
+    fn packet(body: &str) -> String {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DC}\" xmlns:r=\"{NS_XMP}\" xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" rdf:about=\"\">{body}</rdf:Description></rdf:RDF></x:xmpmeta>"
+        )
+    }
+    fn fixture() -> (Connection, PathBuf, PathBuf) {
+        let folder = std::env::temp_dir().join(format!(
+            "lap-xmp-export-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&folder).unwrap();
+        let media = folder.join("photo.jpg");
+        fs::write(&media, b"unchanged-original").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE afolders(id INTEGER PRIMARY KEY,path TEXT); INSERT INTO afolders(id) VALUES(1);
+            CREATE TABLE afiles(id INTEGER PRIMARY KEY,folder_id INTEGER DEFAULT 1,name TEXT DEFAULT 'photo.jpg',rating INTEGER DEFAULT 0,culling_flag INTEGER DEFAULT 0,comments TEXT,has_tags INTEGER DEFAULT 0);
+            CREATE TABLE atags(id INTEGER PRIMARY KEY,name TEXT,group_id INTEGER);CREATE TABLE afile_tags(file_id INTEGER,tag_id INTEGER,UNIQUE(file_id,tag_id));
+            CREATE TABLE atag_groups(id INTEGER PRIMARY KEY,is_default INTEGER);INSERT INTO atag_groups VALUES(1,1);
+            INSERT INTO afiles(id,rating,comments) VALUES(1,4,'local caption'); INSERT INTO atags VALUES(1,'旅行, travel & <test>',1);INSERT INTO afile_tags VALUES(1,1);").unwrap();
+        conn.execute(
+            "UPDATE afolders SET path=?1 WHERE id=1",
+            [folder.to_str().unwrap()],
+        )
+        .unwrap();
+        initialize(&conn).unwrap();
+        (conn, folder, media)
+    }
+    #[test]
+    fn merge_keeps_unknown_xml_hierarchy_and_other_languages() {
+        let unknown = "<crs:Exposure2012>+0.50</crs:Exposure2012><!--keep--><lr:hierarchicalSubject xmlns:lr=\"http://ns.adobe.com/lightroom/1.0/\"><rdf:Bag><rdf:li>Places|Paris</rdf:li></rdf:Bag></lr:hierarchicalSubject>";
+        let xml = packet(&format!(
+            "<r:Rating>2</r:Rating><d:subject><rdf:Bag><rdf:li>old</rdf:li></rdf:Bag></d:subject><d:description><rdf:Alt><rdf:li xml:lang=\"fr\">Français &amp; texte</rdf:li><rdf:li xml:lang=\"x-default\">old</rdf:li></rdf:Alt></d:description>{unknown}"
+        ));
+        let out = merge(&xml, 5, &["A,B & <C>".into()], "新备注 & <test>", ALL).unwrap();
+        assert!(out.contains("<crs:Exposure2012>+0.50</crs:Exposure2012><!--keep-->"));
+        assert!(!out.contains("Places|Paris"));
+        assert!(out.contains("<rdf:li xml:lang=\"fr\">Français &amp; texte</rdf:li>"));
+        let parsed = parse_xmp_str(&out).unwrap();
+        assert_eq!(parsed.rating, Some(5));
+        assert_eq!(parsed.description.as_deref(), Some("新备注 & <test>"));
+        assert!(parsed.tags.unwrap().contains(&"A,B & <C>".into()));
+    }
+    #[test]
+    fn shorthand_and_explicit_clears() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DC}\" xmlns:r=\"{NS_XMP}\" r:Rating=\"5\" d:description=\"old\" d:subject=\"old\" custom=\"untouched\"/></rdf:RDF>"
+        );
+        let out = merge(&xml, 0, &[], "", ALL).unwrap();
+        assert!(out.contains("custom=\"untouched\""));
+        let m = parse_xmp_str(&out).unwrap();
+        assert_eq!(m.rating, Some(0));
+        assert_eq!(m.tags, Some(vec![]));
+        assert_eq!(m.description, Some(String::new()));
+    }
+    #[test]
+    fn empty_rdf_and_partial_update() {
+        let out = merge(&format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"/>"), 3, &[], "", 1).unwrap();
+        assert_eq!(parse_xmp_str(&out).unwrap().rating, Some(3));
+        let out = merge(
+            &packet("<r:Rating>4</r:Rating><d:description>original</d:description>"),
+            0,
+            &["new".into()],
+            "",
+            8,
+        )
+        .unwrap();
+        let m = parse_xmp_str(&out).unwrap();
+        assert_eq!(m.rating, Some(4));
+        assert_eq!(m.description.as_deref(), Some("original"));
+        assert!(merge("<!DOCTYPE x><x/>", 0, &[], "", ALL).is_err());
+        assert!(
+            merge(
+                &packet("<r:Rating>2</r:Rating>")
+                    .replace("rdf:about=\"\"", "rdf:about=\"file:///photo.jpg\""),
+                3,
+                &[],
+                "",
+                ALL
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn manual_export_round_trip_preserves_original_and_reports_failures() {
+        let (conn, folder, media) = fixture();
+        let result = save_batch(&conn, &[999, 1]);
+        assert_eq!(result.saved_ids, vec![1]);
+        assert_eq!(result.failures.len(), 1);
+        let sidecar = folder.join("photo.jpg.xmp");
+        let m = read_xmp_file(&sidecar).unwrap();
+        assert_eq!(m.rating, Some(4));
+        assert_eq!(m.description.as_deref(), Some("local caption"));
+        assert_eq!(m.tags.unwrap(), vec!["旅行, travel & <test>"]);
+        assert_eq!(fs::read(&media).unwrap(), b"unchanged-original");
+        fs::write(&sidecar, b"malformed XML").unwrap();
+        assert_eq!(save_batch(&conn, &[1]).failures.len(), 1);
+        assert_eq!(fs::read(&sidecar).unwrap(), b"malformed XML");
+        assert!(
+            !fs::read_dir(&folder).unwrap().any(|e| e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp"))
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn shared_stem_is_rejected_and_full_name_wins() {
+        let (conn, folder, _) = fixture();
+        fs::write(folder.join("photo.xmp"), packet("")).unwrap();
+        fs::write(folder.join("photo.raw"), b"raw").unwrap();
+        assert_eq!(save_batch(&conn, &[1]).failures.len(), 1);
+        fs::write(folder.join("photo.jpg.XMP"), packet("")).unwrap();
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        assert_eq!(
+            fs::read_to_string(folder.join("photo.xmp")).unwrap(),
+            packet("")
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn local_edits_and_import_never_write_sidecars() {
+        let (conn, folder, media) = fixture();
+        conn.execute(
+            "UPDATE afiles SET rating=0,culling_flag=2,comments='local edit' WHERE id=1",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE atags SET name='renamed' WHERE id=1", [])
+            .unwrap();
+        assert!(!folder.join("photo.jpg.xmp").exists());
+        let external = packet("<r:Rating>2</r:Rating>");
+        fs::write(folder.join("photo.jpg.xmp"), &external).unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RefreshNonDestructive,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(folder.join("photo.jpg.xmp")).unwrap(),
+            external
+        );
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        let saved = read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap();
+        assert_eq!(saved.rating, Some(0));
+        assert_eq!(saved.culling_flag, Some(2));
+        assert_eq!(saved.description.as_deref(), Some("local edit"));
+        assert_eq!(saved.tags, Some(vec!["renamed".into()]));
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn failed_manual_export_can_be_retried() {
+        let (conn, folder, _) = fixture();
+        fs::write(folder.join("photo.jpg.xmp"), "broken").unwrap();
+        assert_eq!(save_batch(&conn, &[1]).failures.len(), 1);
+        assert_eq!(
+            fs::read_to_string(folder.join("photo.jpg.xmp")).unwrap(),
+            "broken"
+        );
+        fs::remove_file(folder.join("photo.jpg.xmp")).unwrap();
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn forced_refresh_bypasses_fingerprint_but_protects_local_clear() {
+        let (conn, folder, media) = fixture();
+        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+            .unwrap();
+        fs::write(
+            folder.join("photo.jpg.xmp"),
+            packet("<r:Rating>5</r:Rating>"),
+        )
+        .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RescanNonDestructive,
+        )
+        .unwrap();
+        conn.execute("UPDATE axmp_imports SET dirty=0 WHERE file_id=1", [])
+            .unwrap(); // simulate an unedited empty field
+        assert!(
+            !import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RescanNonDestructive
+            )
+            .unwrap()
+        );
+        assert!(
+            import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RefreshNonDestructive
+            )
+            .unwrap()
+        );
+        conn.execute("UPDATE afiles SET rating=0 WHERE id=1", [])
+            .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RefreshNonDestructive,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT rating FROM afiles WHERE id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            0
+        );
+        conn.execute("DELETE FROM afile_tags WHERE file_id=1", [])
+            .unwrap();
+        conn.execute("UPDATE afiles SET comments=NULL WHERE id=1", [])
+            .unwrap();
+        fs::write(folder.join("photo.jpg.xmp"), packet("<d:subject><rdf:Bag><rdf:li>external</rdf:li></rdf:Bag></d:subject><d:description>external</d:description>")).unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RefreshNonDestructive,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM afile_tags WHERE file_id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            conn.query_row("SELECT comments FROM afiles WHERE id=1", [], |r| r
+                .get::<_, Option<String>>(0))
+                .unwrap(),
+            None
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn external_change_or_concurrent_creation_is_not_overwritten() {
+        let (_conn, folder, _) = fixture();
+        let dest = folder.join("test.xmp");
+        let temp = folder.join("staged.tmp");
+        fs::write(&dest, b"external change").unwrap();
+        fs::write(&temp, b"new export").unwrap();
+        assert!(publish(&temp, &dest, Some(b"old snapshot")).is_err());
+        assert!(publish(&temp, &dest, None).is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"external change");
+        assert!(publish(&temp, &dest, Some(b"external change")).is_ok());
+        assert_eq!(fs::read(&dest).unwrap(), b"new export");
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn sidecar_symlink_is_rejected_without_touching_target() {
+        let (conn, folder, _) = fixture();
+        let target = folder.join("target.xml");
+        fs::write(&target, packet("")).unwrap();
+        std::os::unix::fs::symlink(&target, folder.join("photo.jpg.xmp")).unwrap();
+        assert_eq!(save_batch(&conn, &[1]).failures.len(), 1);
+        assert_eq!(fs::read_to_string(&target).unwrap(), packet(""));
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn legacy_auto_write_schema_is_removed_without_losing_local_values() {
+        let (conn, folder, _) = fixture();
+        conn.execute_batch("CREATE TABLE axmp_write_control(id INTEGER PRIMARY KEY,enabled INTEGER);INSERT INTO axmp_write_control VALUES(1,1);
+            CREATE TABLE axmp_writes(file_id INTEGER PRIMARY KEY,mask INTEGER,revision INTEGER,error TEXT);INSERT INTO axmp_writes VALUES(1,15,1,NULL);
+            CREATE TRIGGER axmp_write_rating AFTER UPDATE OF rating ON afiles BEGIN INSERT OR REPLACE INTO axmp_writes VALUES(NEW.id,1,1,NULL);END;").unwrap();
+        initialize(&conn).unwrap();
+        initialize(&conn).unwrap();
+        let legacy:i64=conn.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('axmp_write_control','axmp_writes','axmp_write_rating')",[],|r|r.get(0)).unwrap();
+        assert_eq!(legacy, 0);
+        conn.execute("UPDATE afiles SET rating=5 WHERE id=1", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row(
+                "SELECT dirty & 1 FROM axmp_imports WHERE file_id=1",
+                [],
+                |r| r.get::<_, i32>(0)
+            )
+            .unwrap(),
+            1
+        );
+        assert!(!folder.join("photo.jpg.xmp").exists());
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        assert_eq!(
+            read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap().rating,
+            Some(5)
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn independent_exiftool_reads_exported_values() {
+        if std::env::var("LAP_TEST_EXIFTOOL").as_deref() != Ok("1") {
+            return;
+        }
+        let (conn, folder, _) = fixture();
+        assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+        let result = std::process::Command::new("exiftool")
+            .args(["-s3", "-Rating", "-Subject", "-Description"])
+            .arg(folder.join("photo.jpg.xmp"))
+            .output()
+            .expect("ExifTool required with LAP_TEST_EXIFTOOL=1");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            vec!["4", "旅行, travel & <test>", "local caption"]
+        );
+        for (flag, pick) in [(1, "1"), (2, "-1"), (0, "0")] {
+            conn.execute("UPDATE afiles SET culling_flag=?1 WHERE id=1", [flag])
+                .unwrap();
+            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+            let actual = std::process::Command::new("exiftool")
+                .args(["-s3", "-n", "-XMP-xmp:Rating", "-XMP-xmpDM:Pick"])
+                .arg(folder.join("photo.jpg.xmp"))
+                .output()
+                .unwrap();
+            assert!(actual.status.success());
+            assert_eq!(
+                String::from_utf8(actual.stdout)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                vec!["4", pick]
+            );
+        }
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn culling_and_stars_round_trip_for_every_combination() {
+        let legacy = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:m=\"{NS_XMP_DM}\" xmlns:r=\"{NS_XMP}\" xmlns:dt=\"{NS_DARKTABLE}\" r:Rating=\"-1\" r:Label=\"Reject\" m:pick=\"-1\" m:good=\"False\" dt:rejected=\"1\"><m:good>False</m:good><r:Label>Pick</r:Label></rdf:Description></rdf:RDF>"
+        );
+        for rating in 0..=5 {
+            for flag in 0..=2 {
+                let output = merge_with_culling(&legacy, rating, flag, &[], "", ALL).unwrap();
+                let parsed = parse_xmp_str(&output).unwrap();
+                assert_eq!(parsed.rating, Some(rating));
+                assert_eq!(parsed.culling_flag, Some(flag));
+                assert!(!output.contains("<r:Label>Pick</r:Label>"));
+                assert!(!output.contains("r:Label=\"Reject\""));
+                let bytes = crate::t_metadata::tests::jpeg_with_xmp_packet(output.as_bytes());
+                let path = std::env::temp_dir().join(format!(
+                    "lap-culling-roundtrip-{}-{}.jpg",
+                    std::process::id(),
+                    SERIAL.fetch_add(1, Ordering::Relaxed)
+                ));
+                fs::write(&path, bytes).unwrap();
+                let embedded = crate::t_metadata::read(&path).organization;
+                assert_eq!(embedded.rating, Some(rating));
+                assert_eq!(embedded.culling_flag, Some(flag));
+                fs::remove_file(path).unwrap();
+                if flag == 0 {
+                    assert!(!output.contains("<xmpDM:good>"));
+                }
+            }
+        }
+        // A genuine color label is not a culling property.
+        let output =
+            merge_with_culling(&packet("<r:Label>Red</r:Label>"), 4, 1, &[], "", ALL).unwrap();
+        assert!(output.contains("<r:Label>Red</r:Label>"));
+    }
+    #[test]
+    fn culling_manual_export_and_local_unflag_are_protected() {
+        let (conn, folder, media) = fixture();
+        for flag in [1, 2, 0] {
+            conn.execute("UPDATE afiles SET culling_flag=?1 WHERE id=1", [flag])
+                .unwrap();
+            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+            let parsed = read_xmp_file(&folder.join("photo.jpg.xmp")).unwrap();
+            assert_eq!(parsed.culling_flag, Some(flag));
+            assert_eq!(parsed.rating, Some(4));
+            // Even a rating-only edit must retain the current flag.
+            conn.execute("UPDATE afiles SET rating=3 WHERE id=1", [])
+                .unwrap();
+            assert_eq!(save_batch(&conn, &[1]).saved_ids, vec![1]);
+            assert_eq!(
+                read_xmp_file(&folder.join("photo.jpg.xmp"))
+                    .unwrap()
+                    .culling_flag,
+                Some(flag)
+            );
+            conn.execute("UPDATE afiles SET rating=4 WHERE id=1", [])
+                .unwrap();
+            save_batch(&conn, &[1]);
+        }
+        fs::write(
+            folder.join("photo.jpg.xmp"),
+            packet("<r:Rating>-1</r:Rating>"),
+        )
+        .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RefreshNonDestructive,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            0
+        );
+
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn empty_description_alt_can_be_updated() {
+        for alt in ["<rdf:Alt/>", "<rdf:Alt />", "<rdf:Alt></rdf:Alt>"] {
+            let xml = packet(&format!("<d:description>{alt}</d:description>"));
+            let output = merge_with_culling(&xml, 4, 1, &[], "new caption", ALL).unwrap();
+            let parsed = parse_xmp_str(&output).unwrap();
+            assert_eq!(parsed.description.as_deref(), Some("new caption"));
+            assert_eq!(parsed.rating, Some(4));
+            assert_eq!(parsed.culling_flag, Some(1));
+        }
+    }
+
+    #[test]
+    fn previous_import_version_backfills_culling_once() {
+        let (conn, folder, media) = fixture();
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dm=\"{NS_XMP_DM}\" dm:pick=\"1\"/></rdf:RDF>"
+        );
+        fs::write(
+            &media,
+            crate::t_metadata::tests::jpeg_with_xmp_packet(xml.as_bytes()),
+        )
+        .unwrap();
+        let info = fs::metadata(&media).unwrap();
+        let old = format!(
+            "embedded-v1:{}:{:?}:{}:None:None",
+            media.display(),
+            info.modified().ok(),
+            info.len()
+        );
+        conn.execute(
+            "INSERT INTO axmp_imports(file_id,fingerprint,dirty) VALUES(1,?1,0)",
+            [&old],
+        )
+        .unwrap();
+        assert!(
+            import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RescanNonDestructive
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            !import_xmp_for_file_with_conn(
+                1,
+                media.to_str().unwrap(),
+                &conn,
+                XmpImportMode::RescanNonDestructive
+            )
+            .unwrap()
+        );
+        // Even an old-version import must preserve an explicit local unflag.
+        conn.execute("UPDATE afiles SET culling_flag=0 WHERE id=1", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE axmp_imports SET fingerprint=?1 WHERE file_id=1",
+            [&old],
+        )
+        .unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::RescanNonDestructive,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            0
+        );
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn new_sidecar_is_published_by_exclusive_rename() {
+        let (_conn, folder, _) = fixture();
+        let temp = folder.join("staged.tmp");
+        let dest = folder.join("new.xmp");
+        fs::write(&temp, b"complete packet").unwrap();
+        publish(&temp, &dest, None).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"complete packet");
+        assert!(
+            !temp.exists(),
+            "rename must move the file, not create a hard link"
+        );
+        fs::write(&temp, b"concurrent packet").unwrap();
+        assert!(publish(&temp, &dest, None).is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"complete packet");
+        assert_eq!(fs::read(&temp).unwrap(), b"concurrent packet");
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn sidecar_flag_precedence_and_namespace_aliases() {
+        let (conn, folder, media) = fixture();
+        let embedded = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:xmpDM=\"{NS_XMP_DM}\" xmpDM:pick=\"1\"/></rdf:RDF>"
+        );
+        fs::write(
+            &media,
+            crate::t_metadata::tests::jpeg_with_xmp_packet(embedded.as_bytes()),
+        )
+        .unwrap();
+        let sidecar = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:alias=\"{NS_XMP_DM}\" alias:pick=\"-1\"/></rdf:RDF>"
+        );
+        fs::write(folder.join("photo.jpg.xmp"), sidecar).unwrap();
+        import_xmp_for_file_with_conn(
+            1,
+            media.to_str().unwrap(),
+            &conn,
+            XmpImportMode::InitialScan,
+        )
+        .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT culling_flag FROM afiles WHERE id=1", [], |r| r
+                .get::<_, i32>(0))
+                .unwrap(),
+            2
+        );
+
+        fs::remove_dir_all(folder).unwrap();
+    }
+    #[test]
+    fn cleared_tags_do_not_reappear_from_preserved_hierarchy() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:lr=\"{NS_LR}\"><lr:hierarchicalSubject><rdf:Bag><rdf:li>Places|Paris</rdf:li></rdf:Bag></lr:hierarchicalSubject></rdf:Description></rdf:RDF>"
+        );
+        let output = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
+        assert_eq!(parse_xmp_str(&output).unwrap().tags, Some(vec![]));
+    }
+    #[test]
+    fn packet_readonly_marker_is_not_caption_text() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dc=\"{NS_DC}\"><dc:description><![CDATA[end=\"r\"]]></dc:description></rdf:Description></rdf:RDF>"
+        );
+        assert!(merge_with_culling(&xml, 3, 0, &[], "", 1).is_ok());
+        for ending in ["end='r'", "end = \"r\""] {
+            assert!(
+                merge_with_culling(&format!("{xml}<?xpacket {ending}?>"), 3, 0, &[], "", 1)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn all_keyword_stores_follow_replacements_and_clears() {
+        for shorthand in [true, false] {
+            let properties = if shorthand {
+                "l:hierarchicalSubject=\"old\" k:TagsList=\"old\""
+            } else {
+                ""
+            };
+            let body = if shorthand {
+                ""
+            } else {
+                "<l:hierarchicalSubject><rdf:Bag><rdf:li>old</rdf:li></rdf:Bag></l:hierarchicalSubject><k:TagsList><rdf:Seq><rdf:li>old</rdf:li></rdf:Seq></k:TagsList>"
+            };
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:l=\"{NS_LR}\" xmlns:k=\"{NS_DIGIKAM}\" {properties}>{body}</rdf:Description></rdf:RDF>"
+            );
+            for tags in [vec!["new & tag".to_string()], vec![]] {
+                let merged = merge_with_culling(&xml, 0, 0, &tags, "", 8).unwrap();
+                assert!(!merged.contains("old"));
+                assert_eq!(parse_xmp_str(&merged).unwrap().tags, Some(tags));
+                assert!(merged.contains("lr:hierarchicalSubject"));
+                assert!(merged.contains("digiKam:TagsList"));
+            }
+            let rating_only = merge_with_culling(&xml, 4, 0, &[], "", 1).unwrap();
+            assert!(rating_only.contains("old"));
+        }
+    }
+    #[test]
+    fn unmanaged_shorthand_attributes_survive_repeated_exports() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:xmp=\"{NS_XMP}\" xmlns:c=\"urn:custom?a=1&amp;b=2\" xmp:Rating=\"2\" c:value=\"A &amp; B &lt;C&gt; &quot;D&quot; &apos;E&apos; 照片\"/></rdf:RDF>"
+        );
+        let mut merged = xml;
+        for _ in 0..3 {
+            merged = merge_with_culling(&merged, 4, 0, &[], "", ALL).unwrap();
+            let root = parse_xml(&merged).unwrap();
+            let mut props = Vec::new();
+            collect_properties(&root, &mut props);
+            assert_eq!(
+                props.iter().find(|n| n.name == "value").unwrap().value(),
+                "A & B <C> \"D\" 'E' 照片"
+            );
+            assert!(!merged.contains("&amp;amp;"));
+            assert!(merged.contains("xmlns:c=\"urn:custom?a=1&amp;b=2\""));
+        }
+    }
+    #[test]
+    fn darktable_compatibility_is_updated_only_when_present() {
+        let base = format!("<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description/></rdf:RDF>");
+        assert!(
+            !merge_with_culling(&base, 0, 2, &[], "", ALL)
+                .unwrap()
+                .contains("<darktable:rejected>")
+        );
+        for property in ["d:rejected=\"1\"", ""] {
+            let body = if property.is_empty() {
+                "<d:rejected>1</d:rejected>"
+            } else {
+                ""
+            };
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_DARKTABLE}\" {property}>{body}</rdf:Description></rdf:RDF>"
+            );
+            let merged = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
+            assert!(merged.contains("<darktable:rejected>0</darktable:rejected>"));
+            assert_eq!(parse_xmp_str(&merged).unwrap().culling_flag, Some(0));
+        }
+    }
+    #[test]
+    fn extended_values_override_same_standard_property() {
+        let packet = |pick| {
+            format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:d=\"{NS_XMP_DM}\" d:pick=\"{pick}\"/></rdf:RDF>"
+            )
+        };
+        assert_eq!(culling_from_packets(&[packet(-1), packet(1)]), Some(1));
+        assert_eq!(culling_from_packets(&[packet(1), packet(0)]), Some(0));
+    }
+    #[test]
+    fn empty_description_is_removed_but_custom_attributes_survive() {
+        for (attr, expected) in [("", 1), ("c:x=\"keep\"", 2)] {
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:xmp=\"{NS_XMP}\" xmlns:c=\"urn:custom\" xmp:Rating=\"2\" {attr}/></rdf:RDF>"
+            );
+            let merged = merge_with_culling(&xml, 4, 0, &[], "", ALL).unwrap();
+            assert_eq!(merged.matches("<rdf:Description").count(), expected);
+            if expected == 2 {
+                assert!(merged.contains("c:x=\"keep\""));
+            }
+        }
+    }
+
+    #[test]
+    fn export_index_updates_publications_and_checks_shared_stems() {
+        let (_, dir, _) = fixture();
+        fs::write(dir.join("pair.CR2"), b"raw").unwrap();
+        fs::write(dir.join("pair.JPG"), b"jpeg").unwrap();
+        fs::write(dir.join("pair.xmp"), packet("")).unwrap();
+        let mut cache = ExportIndex::default();
+        assert!(destination(&dir.join("pair.CR2"), &mut cache).is_err());
+        let specific = dir.join("pair.CR2.XMP");
+        fs::write(&specific, packet("")).unwrap();
+        cache.published(&specific);
+        assert_eq!(
+            destination(&dir.join("pair.CR2"), &mut cache).unwrap(),
+            specific
+        );
+        let media = dir.join("new.jpg");
+        fs::write(&media, b"jpeg").unwrap();
+        let new_sidecar = destination(&media, &mut cache).unwrap();
+        fs::write(&new_sidecar, packet("")).unwrap();
+        cache.published(&new_sidecar);
+        assert_eq!(destination(&media, &mut cache).unwrap(), new_sidecar);
+        // A fresh batch must see filesystem changes made after the last batch.
+        fs::remove_file(&new_sidecar).unwrap();
+        let replacement = dir.join("new.xmp");
+        fs::write(&replacement, packet("")).unwrap();
+        assert_eq!(
+            destination(&media, &mut ExportIndex::default()).unwrap(),
+            replacement
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn nested_resource_tags_are_not_photo_keywords() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{NS_RDF}\"><rdf:Description xmlns:dc=\"{NS_DC}\" xmlns:c=\"urn:custom\"><dc:subject><rdf:Bag><rdf:li>photo</rdf:li></rdf:Bag></dc:subject><c:resource><rdf:Description rdf:about=\"urn:other\"><dc:subject><rdf:Bag><rdf:li>resource</rdf:li></rdf:Bag></dc:subject></rdf:Description></c:resource></rdf:Description></rdf:RDF>"
+        );
+        let merged = merge_with_culling(&xml, 0, 0, &[], "", ALL).unwrap();
+        assert!(merged.contains("<rdf:li>resource</rdf:li>"));
+        assert_eq!(parse_xmp_str(&merged).unwrap().tags, Some(vec![]));
+    }
+
+    #[test]
+    fn refresh_index_is_shared_across_requests_and_bound_to_library() {
+        let (_, dir, media) = fixture();
+        let id = begin_refresh_batch("test-library".into()).unwrap();
+        {
+            let _scope = refresh_index_scope(Some(id), "test-library").unwrap();
+            assert!(find_xmp_sidecar(&media).is_none());
+        }
+        let sidecar = dir.join("new-sidecar.xmp");
+        fs::write(&sidecar, packet("")).unwrap();
+        // Inspect reuse after a different request enters on a fresh worker thread.
+        std::thread::spawn(move || {
+            let _scope = refresh_index_scope(Some(id), "test-library").unwrap();
+            let index = REFRESH_INDEX.with(|v| v.borrow().clone().unwrap());
+            assert_eq!(index.lock().unwrap().0.len(), 1);
+        })
+        .join()
+        .unwrap();
+        assert!(refresh_index_scope(Some(id), "other-library").is_err());
+        end_refresh_batch(id);
+        assert!(refresh_index_scope(Some(id), "test-library").is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn tag_lookup_uses_nocase_index() {
+        let (conn, dir, _) = fixture();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM atags WHERE name=?1 COLLATE NOCASE",
+                ["tag"],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("SEARCH") && plan.contains("idx_atags_name_nocase"),
+            "{plan}"
         );
         fs::remove_dir_all(dir).unwrap();
     }

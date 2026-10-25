@@ -253,7 +253,8 @@ pub fn preview(ids: &[i64], options: &RenameOptions) -> Result<RenamePreview, St
 
 /// Use platform rename-without-replacement, including for rollback. Files never
 /// fall back to an overwriting rename when the filesystem lacks this operation.
-fn rename_exclusive(old: &Path, new: &Path) -> Result<(), String> {
+// METADATA_HARNESS_RENAME_BEGIN
+pub(crate) fn rename_exclusive(old: &Path, new: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
@@ -304,6 +305,8 @@ fn rename_exclusive(old: &Path, new: &Path) -> Result<(), String> {
     #[cfg(not(any(unix, windows)))]
     Err("Batch rename is unsupported on this platform.".into())
 }
+
+// METADATA_HARNESS_RENAME_END
 
 fn apply_moves(
     moves: &[RenameMove],

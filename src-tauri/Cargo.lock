@@ -26,6 +26,7 @@ dependencies = [
  "kamadak-exif",
  "libc",
  "little_exif",
+ "memmap2",
  "ndarray",
  "objc2",
  "objc2-app-kit",

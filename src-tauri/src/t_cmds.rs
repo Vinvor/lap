@@ -2945,7 +2945,11 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
             && m.len() as i64 == old.size
             && t_utils::systemtime_to_timestamp(m.modified().ok()) == old.modified_at
     }) {
-        return Ok(Some(FileRefreshResult { file: old, size_delta: 0, skipped: true, ..Default::default() }));
+        if crate::t_xmp::is_xmp_import_enabled() {
+            crate::t_xmp::import_xmp_for_file_with_mode(file_id, path, crate::t_xmp::XmpImportMode::RefreshNonDestructive)?;
+        }
+        let file = AFile::get_file_info(file_id)?.unwrap_or(old);
+        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, ..Default::default() }));
     }
     let updated = AFile::update_file_info(file_id, path, chrono::Utc::now().timestamp_millis())?;
     if let Some(ref file) = updated {
@@ -2968,14 +2972,27 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
     }))
 }
 
+#[tauri::command]
+pub fn begin_file_refresh_batch(library_id: String) -> Result<u64, String> {
+    let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
+    if t_config::current_library_id()? != library_id { return Err("Library changed".into()); }
+    crate::t_xmp::begin_refresh_batch(library_id)
+}
+
+#[tauri::command]
+pub fn end_file_refresh_batch(batch_id: u64) {
+    crate::t_xmp::end_refresh_batch(batch_id);
+}
+
 /// Force a selected file refresh without accepting a stale frontend file path.
 #[tauri::command]
-pub async fn refresh_selected_file_info(library_id: String, file_id: i64) -> Result<Option<FileRefreshResult>, String> {
+pub async fn refresh_selected_file_info(library_id: String, file_id: i64, batch_id: Option<u64>) -> Result<Option<FileRefreshResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
         if t_config::current_library_id()? != library_id {
             return Err("Library changed".to_string());
         }
+        let _index = crate::t_xmp::refresh_index_scope(batch_id, &library_id)?;
         refresh_file(file_id, false)
     }).await.map_err(|e| format!("File refresh task failed: {e}"))?
 }
@@ -2986,6 +3003,7 @@ pub async fn refresh_selected_file_info(library_id: String, file_id: i64) -> Res
 #[tauri::command]
 pub async fn index_cloud_file(
     library_id: String,
+    batch_id: Option<u64>,
     file_id: i64,
     thumbnail_size: u32,
     raw_display_options: RawDisplayOptions,
@@ -2995,6 +3013,7 @@ pub async fn index_cloud_file(
         if t_config::current_library_id()? != library_id {
             return Err("Library changed".to_string());
         }
+        let _index = crate::t_xmp::refresh_index_scope(batch_id, &library_id)?;
         let path = AFile::get_file_info(file_id)?.and_then(|file| file.file_path).ok_or("File not found")?;
         let was_cloud_only = t_utils::is_cloud_only_path(&path);
         let Some(mut result) = refresh_file(file_id, true)? else { return Ok(None) };
@@ -3202,12 +3221,19 @@ pub fn set_xmp_import_settings(import_xmp_sidecars: bool) {
 }
 
 #[tauri::command]
-pub async fn import_xmp_metadata(file_ids: Vec<i64>) -> Result<crate::t_xmp::XmpBatchResult, String> {
+pub async fn save_xmp_metadata(
+    library_id: String,
+    file_ids: Vec<i64>,
+) -> Result<crate::t_xmp::BatchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let files = AFile::get_files_by_ids(&file_ids)?;
+        let _guard = FILE_REFRESH_LIBRARY_LOCK
+            .read()
+            .map_err(|e| e.to_string())?;
+        if t_config::current_library_id()? != library_id {
+            return Err("Library changed".into());
+        }
         let conn = crate::t_sqlite::open_conn()?;
-        let paths: Vec<_> = files.into_iter().filter_map(|f| Some((f.id?, f.file_path?))).collect();
-        Ok(crate::t_xmp::import_batch(&paths, &conn))
+        Ok(crate::t_xmp::save_batch(&conn, &file_ids))
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?

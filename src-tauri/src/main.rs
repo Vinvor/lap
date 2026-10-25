@@ -347,6 +347,8 @@ async fn main() {
             t_cmds::get_file_thumbs,
             t_cmds::get_file_info,
             t_cmds::update_file_info,
+            t_cmds::begin_file_refresh_batch,
+            t_cmds::end_file_refresh_batch,
             t_cmds::refresh_selected_file_info,
             t_cmds::index_cloud_file,
             t_cmds::is_cloud_only_file,
@@ -369,7 +371,7 @@ async fn main() {
             // xmp
             t_cmds::get_xmp_import_settings,
             t_cmds::set_xmp_import_settings,
-            t_cmds::import_xmp_metadata,
+            t_cmds::save_xmp_metadata,
             // tag
             t_cmds::get_tag_group_name,
             t_cmds::get_tag_groups,

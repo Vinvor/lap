@@ -740,9 +740,9 @@
       "show_info": "Info tonen",
       "remove_from_collection": "Uit collectie halen",
       "create_montage": "Collage maken",
-      "import_xmp": "Importeren uit XMP",
-      "xmp_import_success": "Metadata geïmporteerd uit {count} XMP-sidecar(s)",
-      "xmp_import_failed": "XMP importeren mislukt voor {count} bestand(en)"
+      "save_xmp": "Metadata opslaan in XMP",
+      "xmp_save_success": "XMP-metadata opgeslagen voor {count} bestand(en)",
+      "xmp_save_failed": "XMP opslaan mislukt voor {count} bestand(en)"
     },
     "calendar": {
       "monthly": "Per maand",
@@ -1366,7 +1366,7 @@
       "preview_mode": "RAW-voorbeeldmodus",
       "section_xmp": "XMP-sidecars",
       "xmp_import": "XMP-metadata importeren",
-      "xmp_import_hint": "Lees beoordelingen, tags, selectievlaggen en opmerkingen uit .xmp-sidecars"
+      "xmp_import_hint": "Bij scannen en vernieuwen gekoppelde bestanden en ondersteunde ingesloten metadata importeren, met behoud van lokale wijzigingen."
     },
     "browse": {
       "section_album": "Albummap",

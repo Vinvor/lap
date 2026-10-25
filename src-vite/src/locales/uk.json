@@ -740,9 +740,9 @@
       "show_info": "Показати відомості",
       "remove_from_collection": "Вилучити з добірки",
       "create_montage": "Створити колаж",
-      "import_xmp": "Імпортувати з XMP",
-      "xmp_import_success": "Метадані імпортовано з {count} XMP-файлу(ів)",
-      "xmp_import_failed": "Не вдалося імпортувати XMP для {count} файлів"
+      "save_xmp": "Зберегти метадані в XMP",
+      "xmp_save_success": "Метадані XMP збережено для {count} файлів",
+      "xmp_save_failed": "Не вдалося зберегти XMP для {count} файлів"
     },
     "calendar": {
       "monthly": "Помісячно",
@@ -1366,7 +1366,7 @@
       "preview_mode": "Режим попереднього перегляду RAW",
       "section_xmp": "XMP-файли",
       "xmp_import": "Імпорт метаданих XMP",
-      "xmp_import_hint": "Читати рейтинги, теги, прапорці вибору та коментарі з файлів .xmp"
+      "xmp_import_hint": "Імпортувати супровідні файли та підтримувані вбудовані метадані під час сканування й оновлення, зберігаючи локальні зміни."
     },
     "browse": {
       "section_album": "Папка альбому",

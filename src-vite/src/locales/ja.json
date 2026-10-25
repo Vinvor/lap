@@ -740,9 +740,9 @@
       "show_info": "情報を表示",
       "remove_from_collection": "コレクションから削除",
       "create_montage": "コラージュを作成",
-      "import_xmp": "XMP からインポート",
-      "xmp_import_success": "{count} 件の XMP サイドカーからメタデータをインポートしました",
-      "xmp_import_failed": "{count} 件の XMP インポートに失敗しました"
+      "save_xmp": "メタデータを XMP に保存",
+      "xmp_save_success": "{count} 個のファイルの XMP メタデータを保存しました",
+      "xmp_save_failed": "{count} 個のファイルで XMP の保存に失敗しました"
     },
     "calendar": {
       "monthly": "月別",
@@ -1366,7 +1366,7 @@
       "preview_mode": "RAW プレビューモード",
       "section_xmp": "XMP サイドカー",
       "xmp_import": "XMP メタデータのインポート",
-      "xmp_import_hint": ".xmp サイドカーからレーティング、タグ、選別フラグ、コメントを読み込みます"
+      "xmp_import_hint": "スキャンと更新時にサイドカーと対応する埋め込みメタデータを読み込み、ローカルの変更を保持します。"
     },
     "browse": {
       "section_album": "アルバムフォルダ",

@@ -41,17 +41,125 @@ pub fn read(path: &Path) -> Metadata {
                 return values.clone();
             }
         }
-        let options = Options {
-            duplicates: true,
-            ..Options::default()
-        };
-        let values = match ExifTool::with_options(options).extract_info(path) {
-            Ok(tags) => from_tags(&tags),
-            Err(_) => Metadata::default(), // Existing readers still handle this format.
-        };
+        // Reuse the bytes for URI-aware XMP flags: the backend's Tag drops
+        // namespace URIs for unregistered schemas and retains arbitrary prefixes.
+        let values = read_uncached(path).unwrap_or_default();
         *cache.borrow_mut() = Some((key, values.clone()));
         values
     })
+}
+
+// Keep the mapping scoped to one parse: large video payloads are never copied
+// into an owned buffer. Mapping failures retain the backend's read fallback.
+fn read_uncached(path: &Path) -> std::io::Result<Metadata> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() == 0 {
+        return Ok(Metadata::default());
+    }
+    // SAFETY: this is a read-only mapping, used synchronously and dropped before
+    // returning. As with the backend's existing mmap reader, the source must not
+    // be truncated by another process while parsing.
+    match unsafe { memmap2::Mmap::map(&file) } {
+        Ok(bytes) => Ok(from_bytes(&bytes, path)),
+        Err(_) => std::fs::read(path).map(|bytes| from_bytes(&bytes, path)),
+    }
+}
+
+fn from_bytes(bytes: &[u8], path: &Path) -> Metadata {
+    let options = Options {
+        duplicates: true,
+        ..Default::default()
+    };
+    let Ok(tags) = ExifTool::with_options(options).extract_info_from_bytes(bytes, path) else {
+        return Metadata::default();
+    };
+    let mut metadata = from_tags(&tags);
+    if tags.iter().any(|tag| {
+        tag.group.family0 == "XMP"
+            && ["pick", "good", "rejected", "label"]
+                .iter()
+                .any(|name| tag.name.eq_ignore_ascii_case(name))
+    }) {
+        metadata.organization.culling_flag =
+            embedded_culling(bytes).or(metadata.organization.culling_flag);
+    }
+    metadata
+}
+
+/// Resolve flags from their XML namespace URI, never from a user-chosen prefix.
+/// Only inspect container-designated metadata. PNG iTXt may compress its packet;
+/// other supported containers are handled by the bounded packet extractor.
+fn embedded_culling(bytes: &[u8]) -> Option<i32> {
+    const LIMIT: usize = 16 * 1024 * 1024;
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let mut pos = 8usize;
+        while pos.checked_add(12)? <= bytes.len() {
+            let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().ok()?) as usize;
+            let end = pos.checked_add(12)?.checked_add(len)?;
+            if end > bytes.len() {
+                return None;
+            }
+            let chunk = &bytes[pos + 8..pos + 8 + len];
+            if &bytes[pos + 4..pos + 8] == b"iTXt" {
+                if let Some(packet) = png_xmp_packet(chunk, LIMIT) {
+                    if let Some(flag) = parse_culling_packet(&packet) {
+                        return Some(flag);
+                    }
+                }
+            }
+            if &bytes[pos + 4..pos + 8] == b"IEND" {
+                break;
+            }
+            pos = end;
+        }
+        return None;
+    }
+    let packets: Vec<_> = xmp_packets::extract(bytes)
+        .into_iter()
+        .filter_map(|p| xmp_packets::decode(&p))
+        .collect();
+    crate::t_xmp::culling_from_packets(&packets)
+}
+
+#[path = "t_xmp_packets.rs"]
+mod xmp_packets;
+
+fn parse_culling_packet(packet: &[u8]) -> Option<i32> {
+    let text = xmp_packets::decode(packet)?;
+    crate::t_xmp::parse_xmp_str(&text).ok()?.culling_flag
+}
+
+fn png_xmp_packet(chunk: &[u8], limit: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let keyword_end = chunk.iter().position(|b| *b == 0)?;
+    if &chunk[..keyword_end] != b"XML:com.adobe.xmp" {
+        return None;
+    }
+    let compressed = *chunk.get(keyword_end + 1)?;
+    if *chunk.get(keyword_end + 2)? != 0 {
+        return None;
+    }
+    let mut pos = keyword_end + 3;
+    for _ in 0..2 {
+        pos += chunk.get(pos..)?.iter().position(|b| *b == 0)? + 1;
+    }
+    let data = chunk.get(pos..)?;
+    let packet = match compressed {
+        0 if data.len() <= limit => data.to_vec(),
+        1 => {
+            let mut packet = Vec::new();
+            flate2::read::ZlibDecoder::new(data)
+                .take(limit as u64 + 1)
+                .read_to_end(&mut packet)
+                .ok()?;
+            if packet.len() > limit {
+                return None;
+            }
+            packet
+        }
+        _ => return None,
+    };
+    Some(packet)
 }
 
 fn text(tag: &Tag) -> Option<String> {
@@ -120,10 +228,10 @@ fn from_tags(tags: &[Tag]) -> Metadata {
         .min_by_key(|(rank, _)| *rank);
     if let Some((_, value)) = rating {
         organization.rating = Some(value.max(0));
-        if value == -1 {
-            organization.culling_flag = Some(2);
-        }
     }
+    // URI-aware pick/good/rejected/label values are supplied by from_bytes.
+    // A legacy negative rating remains meaningful without an explicit flag.
+    organization.culling_flag = (rating.map(|(_, value)| value) == Some(-1)).then_some(2);
     let mut keywords = Vec::new();
     for tag in tags.iter().filter(|t| {
         matches!(
@@ -260,6 +368,10 @@ pub(crate) mod tests {
 
     pub(crate) fn jpeg_with_xmp() -> Vec<u8> {
         let xmp = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmp:Rating="4"><dc:subject><rdf:Bag><rdf:li>Paris, France</rdf:li><rdf:li>Travel</rdf:li></rdf:Bag></dc:subject><dc:description><rdf:Alt><rdf:li xml:lang="x-default">Embedded caption</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>"#;
+        jpeg_with_xmp_packet(xmp)
+    }
+
+    pub(crate) fn jpeg_with_xmp_packet(xmp: &[u8]) -> Vec<u8> {
         let mut payload = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
         payload.extend(xmp);
         let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
@@ -370,5 +482,367 @@ pub(crate) mod tests {
         assert_eq!(from_tags(&[rating.clone()]).organization.rating, Some(3));
         rating.raw_value = Value::U8(6);
         assert_eq!(from_tags(&[rating]).organization.rating, None);
+    }
+
+    #[test]
+    fn embedded_culling_matches_sidecar_for_all_supported_states() {
+        for (properties, expected) in [
+            ("<xmpDM:pick>1</xmpDM:pick>", Some(1)),
+            ("<xmpDM:pick>-1</xmpDM:pick>", Some(2)),
+            (
+                "<xmpDM:pick>0</xmpDM:pick><xmpDM:good>False</xmpDM:good><xmp:Rating>-1</xmp:Rating>",
+                Some(0),
+            ),
+            ("<xmpDM:good>True</xmpDM:good>", Some(1)),
+            ("<xmpDM:good>False</xmpDM:good>", Some(2)),
+            ("<darktable:rejected>1</darktable:rejected>", Some(2)),
+            ("<darktable:rejected>0</darktable:rejected>", Some(0)),
+            ("<xmp:Label>Pick</xmp:Label>", Some(1)),
+            ("<xmp:Label>Rejected</xmp:Label>", Some(2)),
+            ("<xmp:Rating>-1</xmp:Rating>", Some(2)),
+            ("<xmp:Label>Red</xmp:Label>", None),
+            ("<fake:pick>1</fake:pick>", None),
+        ] {
+            let xml = format!(
+                "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:xmpDM=\"{}\" xmlns:xmp=\"{}\" xmlns:darktable=\"{}\" xmlns:fake=\"urn:not-a-culling-schema\">{properties}</rdf:Description></rdf:RDF>",
+                crate::t_xmp::NS_RDF,
+                crate::t_xmp::NS_XMP_DM,
+                crate::t_xmp::NS_XMP,
+                crate::t_xmp::NS_DARKTABLE
+            );
+            let tags = ExifTool::with_options(Options {
+                duplicates: true,
+                ..Default::default()
+            })
+            .extract_info_from_bytes(
+                &jpeg_with_xmp_packet(xml.as_bytes()),
+                Path::new("flags.jpg"),
+            )
+            .unwrap();
+            assert_eq!(
+                from_bytes(
+                    &jpeg_with_xmp_packet(xml.as_bytes()),
+                    Path::new("flags.jpg")
+                )
+                .organization
+                .culling_flag,
+                expected,
+                "{properties}; tags={tags:?}"
+            );
+            assert_eq!(
+                crate::t_xmp::parse_xmp_str(&xml).unwrap().culling_flag,
+                expected,
+                "{properties}"
+            );
+        }
+    }
+    #[test]
+    fn embedded_culling_resolves_uris_and_rejects_spoofed_prefixes() {
+        for (declarations, properties, expected) in [
+            (
+                format!("xmlns:dm=\"{}\"", crate::t_xmp::NS_XMP_DM),
+                "dm:pick=\"1\"",
+                Some(1),
+            ),
+            (
+                format!("xmlns:dm=\"{}\"", crate::t_xmp::NS_XMP_DM),
+                "dm:good=\"False\"",
+                Some(2),
+            ),
+            (
+                format!("xmlns:dt=\"{}\"", crate::t_xmp::NS_DARKTABLE),
+                "dt:rejected=\"1\"",
+                Some(2),
+            ),
+            (
+                format!("xmlns:r=\"{}\"", crate::t_xmp::NS_XMP),
+                "r:Label=\"Pick\"",
+                Some(1),
+            ),
+            (
+                "xmlns:xmpDM=\"urn:unrelated\"".into(),
+                "xmpDM:pick=\"1\"",
+                None,
+            ),
+            (
+                "xmlns:darktable=\"urn:unrelated\"".into(),
+                "darktable:rejected=\"1\"",
+                None,
+            ),
+        ] {
+            let xml = format!(
+                "<meta:xmpmeta xmlns:meta=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"{}\"><rdf:Description {declarations} {properties}/></rdf:RDF></meta:xmpmeta>",
+                crate::t_xmp::NS_RDF
+            );
+            let bytes = jpeg_with_xmp_packet(xml.as_bytes());
+            let meta = from_bytes(&bytes, Path::new("flags.jpg"));
+            assert_eq!(meta.organization.culling_flag, expected, "{xml}");
+        }
+    }
+
+    #[test]
+    fn compressed_png_culling_uses_namespace_uri() {
+        use std::io::Write;
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:dm=\"{}\" dm:pick=\"-1\"/></rdf:RDF>",
+            crate::t_xmp::NS_RDF,
+            crate::t_xmp::NS_XMP_DM
+        );
+        for compressed in [false, true] {
+            let mut packet = b"XML:com.adobe.xmp\0".to_vec();
+            packet.extend([u8::from(compressed), 0, 0, 0]);
+            if compressed {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(xml.as_bytes()).unwrap();
+                packet.extend(encoder.finish().unwrap());
+            } else {
+                packet.extend(xml.as_bytes());
+            }
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.extend((packet.len() as u32).to_be_bytes());
+            bytes.extend(b"iTXt");
+            bytes.extend(packet);
+            bytes.extend([0; 4]);
+            assert_eq!(embedded_culling(&bytes), Some(2));
+            assert_eq!(
+                from_bytes(&bytes, Path::new("flags.png"))
+                    .organization
+                    .culling_flag,
+                Some(2)
+            );
+        }
+        let oversized = vec![b'x'; 65];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&oversized).unwrap();
+        let mut chunk = b"XML:com.adobe.xmp\0\x01\0\0\0".to_vec();
+        chunk.extend(encoder.finish().unwrap());
+        assert!(png_xmp_packet(&chunk, 64).is_none());
+    }
+}
+
+#[cfg(test)]
+mod final_review {
+    use super::*;
+    #[test]
+    fn jpeg_comment_is_not_an_xmp_metadata_source() {
+        let packet = |flag| {
+            format!(
+                "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:dm=\"{}\" dm:pick=\"{flag}\"/></rdf:RDF>",
+                crate::t_xmp::NS_RDF,
+                crate::t_xmp::NS_XMP_DM
+            )
+        };
+        let comment = packet(-1);
+        let real = tests::jpeg_with_xmp_packet(packet(1).as_bytes());
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xfe];
+        jpeg.extend(((comment.len() + 2) as u16).to_be_bytes());
+        jpeg.extend(comment.as_bytes());
+        jpeg.extend(&real[2..]);
+        let tags = ExifTool::with_options(Options {
+            duplicates: true,
+            ..Default::default()
+        })
+        .extract_info_from_bytes(&jpeg, Path::new("comment.jpg"))
+        .unwrap();
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Pick" && t.raw_value.to_display_string() == "1")
+        );
+        assert!(
+            !tags
+                .iter()
+                .any(|t| t.name == "Pick" && t.raw_value.to_display_string() == "-1")
+        );
+        assert_eq!(
+            from_bytes(&jpeg, Path::new("comment.jpg"))
+                .organization
+                .culling_flag,
+            Some(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod final_review_encoding {
+    use super::*;
+    #[test]
+    fn utf16_embedded_pick_is_not_lost() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:xmpDM=\"{}\" xmpDM:pick=\"1\"/></rdf:RDF>",
+            crate::t_xmp::NS_RDF,
+            crate::t_xmp::NS_XMP_DM
+        );
+        let mut packet = vec![0xff, 0xfe];
+        for unit in xml.encode_utf16() {
+            packet.extend(unit.to_le_bytes());
+        }
+        let jpeg = tests::jpeg_with_xmp_packet(&packet);
+        let tags = ExifTool::with_options(Options {
+            duplicates: true,
+            ..Default::default()
+        })
+        .extract_info_from_bytes(&jpeg, Path::new("utf16.jpg"))
+        .unwrap();
+        assert!(tags.iter().any(|t| t.name == "Pick"
+            && t.group.family1 == "XMP-xmpDM"
+            && t.raw_value.to_display_string() == "1"));
+        assert_eq!(
+            from_bytes(&jpeg, Path::new("utf16.jpg"))
+                .organization
+                .culling_flag,
+            Some(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_review {
+    use super::*;
+    #[test]
+    fn extended_pick_takes_precedence_over_standard_good() {
+        let guid = "0123456789ABCDEF0123456789ABCDEF";
+        let packet = |props: &str| {
+            format!(
+                "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:dm=\"{}\" xmlns:n=\"http://ns.adobe.com/xmp/note/\" {props}/></rdf:RDF>",
+                crate::t_xmp::NS_RDF,
+                crate::t_xmp::NS_XMP_DM
+            )
+        };
+        let main = packet(&format!("dm:good=\"False\" n:HasExtendedXMP=\"{guid}\""));
+        let extended = packet("dm:pick=\"1\"");
+        let mut jpeg = tests::jpeg_with_xmp_packet(main.as_bytes());
+        jpeg.truncate(jpeg.len() - 2);
+        let mut data = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+        data.extend(guid.as_bytes());
+        data.extend((extended.len() as u32).to_be_bytes());
+        data.extend(0u32.to_be_bytes());
+        data.extend(extended.as_bytes());
+        jpeg.extend([0xff, 0xe1]);
+        jpeg.extend(((data.len() + 2) as u16).to_be_bytes());
+        jpeg.extend(data);
+        jpeg.extend([0xff, 0xd9]);
+        let tags = ExifTool::with_options(Options {
+            duplicates: true,
+            ..Default::default()
+        })
+        .extract_info_from_bytes(&jpeg, Path::new("extended.jpg"))
+        .unwrap();
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Pick" && t.raw_value.to_display_string() == "1"),
+            "{tags:?}"
+        );
+        assert_eq!(
+            from_bytes(&jpeg, Path::new("extended.jpg"))
+                .organization
+                .culling_flag,
+            Some(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_review_mov {
+    use super::*;
+    #[test]
+    fn mov_without_ftyp_keeps_embedded_pick() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:dm=\"{}\" dm:pick=\"1\"/></rdf:RDF>",
+            crate::t_xmp::NS_RDF,
+            crate::t_xmp::NS_XMP_DM
+        );
+        let atom = |kind: &[u8], data: &[u8]| {
+            let mut v = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+            v.extend(kind);
+            v.extend(data);
+            v
+        };
+        let bytes = atom(b"moov", &atom(b"udta", &atom(b"XMP_", xml.as_bytes())));
+        let tags = ExifTool::with_options(Options {
+            duplicates: true,
+            ..Default::default()
+        })
+        .extract_info_from_bytes(&bytes, Path::new("flags.mov"))
+        .unwrap();
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Pick" && t.raw_value.to_display_string() == "1"),
+            "{tags:?}"
+        );
+        assert_eq!(
+            from_bytes(&bytes, Path::new("flags.mov"))
+                .organization
+                .culling_flag,
+            Some(1)
+        );
+    }
+}
+
+#[cfg(test)]
+mod mapped_read_tests {
+    use super::*;
+    #[test]
+    fn mapped_read_matches_bytes_and_handles_empty_and_missing_files() {
+        let path = std::env::temp_dir().join(format!(
+            "lap-mapped-{}-{}.jpg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let bytes = tests::jpeg_with_xmp();
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(read_uncached(&path).unwrap().organization.rating, Some(4));
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(read_uncached(&path).unwrap().organization.rating, None);
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_uncached(&path).is_err());
+    }
+}
+
+#[cfg(test)]
+mod deep_review {
+    use super::*;
+    #[test]
+    fn jp2_retains_culling() {
+        let xml = format!(
+            "<rdf:RDF xmlns:rdf=\"{}\"><rdf:Description xmlns:dm=\"{}\" dm:pick=\"1\"/></rdf:RDF>",
+            crate::t_xmp::NS_RDF,
+            crate::t_xmp::NS_XMP_DM
+        );
+        let atom = |kind: &[u8], data: &[u8]| {
+            let mut v = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+            v.extend(kind);
+            v.extend(data);
+            v
+        };
+        let mut bytes = atom(b"jP  ", b"\x0d\x0a\x87\x0a");
+        bytes.extend(atom(b"ftyp", b"jp2 \0\0\0\0jp2 "));
+        let mut payload = vec![
+            0xbe, 0x7a, 0xcf, 0xcb, 0x97, 0xa9, 0x42, 0xe8, 0x9c, 0x71, 0x99, 0x94, 0x91, 0xe3,
+            0xaf, 0xac,
+        ];
+        payload.extend(xml.as_bytes());
+        bytes.extend(atom(b"uuid", &payload));
+        let tags = ExifTool::with_options(Options {
+            duplicates: true,
+            ..Default::default()
+        })
+        .extract_info_from_bytes(&bytes, Path::new("flags.jp2"))
+        .unwrap();
+        assert!(
+            tags.iter()
+                .any(|t| t.name == "Pick" && t.raw_value.to_display_string() == "1"),
+            "{tags:?}"
+        );
+        assert_eq!(
+            from_bytes(&bytes, Path::new("flags.jp2"))
+                .organization
+                .culling_flag,
+            Some(1)
+        );
     }
 }

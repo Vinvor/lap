@@ -3971,8 +3971,11 @@ impl AFile {
                         .is_none_or(|comment| comment.trim().is_empty())
                     {
                         if let Some(comment) = t_ai_png::extract_comment(file_path) {
-                            let _ = Self::update_column(file_id, "comments", &comment);
-                            file.comments = Some(comment);
+                            if let Ok(conn) = open_conn() {
+                                if let Ok(true) = crate::t_xmp::import_scanned_description(file_id, comment, &conn) {
+                                    if let Ok(Some(refreshed)) = Self::get_file_info(file_id) { file = refreshed; }
+                                }
+                            }
                         }
                     }
                     if crate::t_xmp::is_xmp_import_enabled() {
@@ -4129,7 +4132,7 @@ impl AFile {
             let _ = crate::t_xmp::import_xmp_for_file_with_mode(
                 file_id,
                 file_path,
-                crate::t_xmp::XmpImportMode::RescanNonDestructive,
+                crate::t_xmp::XmpImportMode::RefreshNonDestructive,
             );
         }
 

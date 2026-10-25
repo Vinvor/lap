@@ -740,9 +740,9 @@
       "show_info": "정보 보기",
       "remove_from_collection": "컬렉션에서 제거",
       "create_montage": "콜라주 만들기",
-      "import_xmp": "XMP에서 가져오기",
-      "xmp_import_success": "{count}개의 XMP 사이드카에서 메타데이터를 가져왔습니다",
-      "xmp_import_failed": "파일 {count}개의 XMP 가져오기에 실패했습니다"
+      "save_xmp": "메타데이터를 XMP에 저장",
+      "xmp_save_success": "파일 {count}개의 XMP 메타데이터를 저장했습니다",
+      "xmp_save_failed": "파일 {count}개의 XMP 저장에 실패했습니다"
     },
     "calendar": {
       "monthly": "월별",
@@ -1366,7 +1366,7 @@
       "preview_mode": "RAW 미리보기 모드",
       "section_xmp": "XMP 사이드카",
       "xmp_import": "XMP 메타데이터 가져오기",
-      "xmp_import_hint": ".xmp 사이드카에서 등급, 태그, 선택 플래그 및 설명을 읽습니다"
+      "xmp_import_hint": "스캔 및 새로 고침 시 사이드카와 지원되는 내장 메타데이터를 가져오고 로컬 변경 사항을 유지합니다."
     },
     "browse": {
       "section_album": "앨범 폴더",
