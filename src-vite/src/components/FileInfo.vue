@@ -84,7 +84,7 @@
                   @click.stop="increasePreviewScale"
                 />
               </div>
-              <div class="absolute inset-0">
+              <div class="absolute" :style="previewContentStyle">
                 <ImageNavigator
                   v-if="hasPreviewNavigator"
                   class="h-full w-full"
@@ -98,6 +98,7 @@
                 <img
                   v-else-if="fileInfo?.thumbnail"
                   :src="fileInfo.thumbnail"
+                  @load="onPreviewImageLoad"
                   class="h-full w-full object-contain"
                   :style="previewImageStyle"
                   draggable="false"
@@ -469,6 +470,7 @@
 
 <script setup lang="ts">
 import ImageNavigator from '@/components/ImageNavigator.vue';
+import { navigatorLayout } from '@/common/imageNavigator';
 import { ref, nextTick, computed, watch, onBeforeUnmount, onMounted } from 'vue';
 import { listen } from '@tauri-apps/api/event';
 import { useI18n } from 'vue-i18n';
@@ -674,11 +676,37 @@ const normalizedRotate = computed(() => {
   const rotate = Number(props.fileInfo?.rotate || 0) % 360;
   return rotate < 0 ? rotate + 360 : rotate;
 });
+const previewNaturalSize = ref<{ width: number; height: number } | null>(null);
+watch(() => props.fileInfo?.thumbnail, () => { previewNaturalSize.value = null; });
+function onPreviewImageLoad(event: Event) {
+  const image = event.target as HTMLImageElement;
+  if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+    previewNaturalSize.value = { width: image.naturalWidth, height: image.naturalHeight };
+  }
+}
+const previewLayout = computed(() => navigatorLayout({
+  sourceWidth: previewNaturalSize.value?.width || Number(props.fileInfo?.width) || 4,
+  sourceHeight: previewNaturalSize.value?.height || Number(props.fileInfo?.height) || 3,
+  rotate: normalizedRotate.value,
+  scale: 1, normX: 0.5, normY: 0.5, viewportWidth: 0, viewportHeight: 0, pannable: false,
+}, { width: 100, height: 75 * previewScale.value }));
+const previewContentStyle = computed(() => {
+  if (hasPreviewNavigator.value) return { inset: '0' };
+  const layout = previewLayout.value;
+  const height = 75 * previewScale.value;
+  return { left: `${layout.left}%`, top: `${layout.top / height * 100}%`,
+    width: `${layout.width}%`, height: `${layout.height / height * 100}%` };
+});
 const previewImageStyle = computed(() => {
-  const rotate = normalizedRotate.value;
-  const isQuarterTurn = rotate % 180 !== 0;
+  const layout = previewLayout.value;
   return {
-    transform: `rotate(${rotate}deg) scale(${isQuarterTurn ? 0.84 : 1})`,
+    position: 'absolute' as const,
+    left: `${(layout.width - layout.imageWidth) / 2 / layout.width * 100}%`,
+    top: `${(layout.height - layout.imageHeight) / 2 / layout.height * 100}%`,
+    width: `${layout.imageWidth / layout.width * 100}%`,
+    height: `${layout.imageHeight / layout.height * 100}%`,
+    maxWidth: 'none',
+    transform: `rotate(${normalizedRotate.value}deg)`,
     transformOrigin: 'center center',
   };
 });
