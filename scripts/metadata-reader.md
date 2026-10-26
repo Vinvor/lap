@@ -121,3 +121,45 @@ Local favorite edits use dirty bit 16, independent of rating and culling. Manual
 sidecar export writes the current Boolean value, including false, without clearing
 local-edit protection. The embedded import fingerprint is v3 so unchanged libraries
 backfill this field once after upgrading. Both flags share one XML parsing pass.
+
+
+## On-demand file details
+
+File Info loads extended source, capture and GPS direction fields only when their
+section is expanded. These read-only values have no new catalog columns or indexes.
+Existing artist/copyright/description/software columns are supplemented during
+scan/refresh; existing nonempty reader values win. Artist has a NOCASE index.
+
+Source fields prefer sidecar XMP, embedded XMP, IPTC and EXIF. Namespace-aware XML
+preserves multiple creators, language alternatives and explicit empty properties.
+The editable catalog description remains independent. Inspection never writes
+sidecars, downloads cloud-only files or depends on the organization import switch.
+Time-zone offsets are displayed without changing catalog timestamp semantics.
+
+Concurrent sections share one embedded extraction per media path/size/mtime.
+Parsing runs off the UI thread with at most two concurrent requests. The cache
+retains up to 16 idle file entries and 4 MiB of value text; active requests may
+briefly exceed these bounds. Only requested fields are returned. Source-sidecar
+discovery/parsing is lazy and separately cached by path/size/mtime. A shared
+client/generation key coalesces forced refreshes across sections.
+
+The panel keeps target-file snapshots while refreshing, replaces section values
+atomically, and discards stale file/library responses. Only a successful empty
+result hides a section; unread/error sections remain accessible with retry.
+Collapse, file/library changes, refresh and unmount cancel pending requests.
+Cancellation is checked after the concurrency permit and per-file lock; bounded,
+expiring tombstones handle cancellation arriving before registration.
+
+
+## Stored image properties
+
+`afiles.icc_profile`, `color_space` and nullable integer `bit_depth` are populated
+by the existing scan/file-refresh extraction. Migration v20 adds empty
+columns to older catalogs without reading or backfilling historical media. File
+Info renders only nonempty catalog values, including the selected RAW companion's
+values. Opening or expanding File never requests these properties; the former
+image-detail request group and its separate insertion animation are removed.
+Conflicting bit depths (for example original versus embedded preview) remain NULL.
+QuickTime sample-entry BitDepth is excluded because it is not per-channel depth.
+Scan mapping selects only persisted fields, without constructing the extended
+detail rows. No search indexes are added for these three fields.

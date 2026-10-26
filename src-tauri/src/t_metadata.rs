@@ -7,6 +7,13 @@ use std::path::Path;
 pub struct Metadata {
     pub make: Option<String>,
     pub model: Option<String>,
+    pub artist: Option<String>,
+    pub copyright: Option<String>,
+    pub description: Option<String>,
+    pub software: Option<String>,
+    pub icc_profile: Option<String>,
+    pub color_space: Option<String>,
+    pub bit_depth: Option<u16>,
     pub lens_make: Option<String>,
     pub lens_model: Option<String>,
     pub date: Option<String>,
@@ -90,7 +97,7 @@ fn from_bytes(bytes: &[u8], path: &Path) -> Metadata {
 /// Resolve flags from their XML namespace URI, never from a user-chosen prefix.
 /// Only inspect container-designated metadata. PNG iTXt may compress its packet;
 /// other supported containers are handled by the bounded packet extractor.
-fn embedded_flags(bytes: &[u8]) -> (Option<i32>, Option<bool>) {
+fn embedded_packets(bytes: &[u8]) -> Vec<String> {
     const LIMIT: usize = 16 * 1024 * 1024;
     let packets = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         let mut packets = Vec::new();
@@ -122,7 +129,11 @@ fn embedded_flags(bytes: &[u8]) -> (Option<i32>, Option<bool>) {
         .into_iter()
         .filter_map(|p| xmp_packets::decode(&p))
         .collect();
-    crate::t_xmp::flags_from_packets(&packets)
+    packets
+}
+
+fn embedded_flags(bytes: &[u8]) -> (Option<i32>, Option<bool>) {
+    crate::t_xmp::flags_from_packets(&embedded_packets(bytes))
 }
 
 #[cfg(test)]
@@ -259,7 +270,16 @@ fn from_tags(tags: &[Tag]) -> Metadata {
     organization.description = string("Description")
         .or_else(|| string("Caption-Abstract"))
         .or_else(|| string("UserComment"));
+    let source = detail_values_for(tags, true);
+    let detail = |key: &str| source.get(key).map(|d| d.values.join("; "));
     Metadata {
+        artist: detail("creator"),
+        copyright: detail("copyright"),
+        description: detail("description"),
+        software: detail("software"),
+        icc_profile: detail("iccProfile"),
+        color_space: detail("colorSpace"),
+        bit_depth: bit_depth_from_tags(tags),
         make: string("Make"),
         model: string("Model"),
         lens_make: string("LensMake"),
@@ -272,6 +292,29 @@ fn from_tags(tags: &[Tag]) -> Metadata {
         altitude: None,
         organization,
     }
+}
+
+// Conflicting main/preview depths are not a reliable per-channel value.
+// QuickTime BitDepth describes the sample entry, not bits per color channel.
+fn bit_depth_from_tags(tags: &[Tag]) -> Option<u16> {
+    let mut depth = None;
+    for tag in tags.iter().filter(|tag| {
+        matches!(tag.name.as_str(), "BitsPerSample" | "BitDepth")
+            && matches!(tag.group.family0.as_str(), "EXIF" | "PNG" | "File")
+    }) {
+        let raw = tag.raw_value.to_display_string();
+        for token in raw
+            .split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+            .filter(|v| !v.is_empty())
+        {
+            let value: u16 = token.parse().ok()?;
+            if !(1..=64).contains(&value) || depth.is_some_and(|old| old != value) {
+                return None;
+            }
+            depth = Some(value);
+        }
+    }
+    depth
 }
 
 fn push_keyword(word: &str, words: &mut Vec<String>) {
@@ -900,6 +943,378 @@ mod favorite_tests {
                     .favorite,
                 Some(favorite)
             );
+        }
+    }
+}
+
+/// Read-only detail values, deliberately excluded from catalog rows and search indexes.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailValue {
+    pub values: Vec<String>,
+    pub source: String,
+}
+pub type Details = std::collections::BTreeMap<String, DetailValue>;
+
+#[derive(Default)]
+struct DetailCacheEntry {
+    embedded: Option<Details>,
+    refresh_key: Option<String>,
+    sidecar: Option<(String, Option<String>, Details)>,
+}
+type SharedDetails = std::sync::Arc<std::sync::Mutex<DetailCacheEntry>>;
+fn detail_cache() -> &'static std::sync::Mutex<std::collections::VecDeque<(String, SharedDetails)>>
+{
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::VecDeque<(String, SharedDetails)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+fn detail_bytes(details: &Details) -> usize {
+    details
+        .values()
+        .map(|value| value.values.iter().map(String::len).sum::<usize>())
+        .sum()
+}
+fn trim_detail_cache() {
+    if let Ok(mut cache) = detail_cache().lock() {
+        let mut bytes = cache
+            .iter()
+            .filter_map(|(_, entry)| entry.try_lock().ok())
+            .map(|entry| {
+                entry.embedded.as_ref().map(detail_bytes).unwrap_or(0)
+                    + entry
+                        .sidecar
+                        .as_ref()
+                        .map(|(_, _, data)| detail_bytes(data))
+                        .unwrap_or(0)
+            })
+            .sum::<usize>();
+        let mut index = 0;
+        while index < cache.len() && (cache.len() > 16 || bytes > 4 * 1024 * 1024) {
+            // Never evict an extraction that another request is using or waiting for.
+            if std::sync::Arc::strong_count(&cache[index].1) == 1 {
+                let (_, entry) = cache.remove(index).unwrap();
+                if let Ok(entry) = entry.lock() {
+                    bytes = bytes.saturating_sub(
+                        entry.embedded.as_ref().map(detail_bytes).unwrap_or(0)
+                            + entry
+                                .sidecar
+                                .as_ref()
+                                .map(|(_, _, data)| detail_bytes(data))
+                                .unwrap_or(0),
+                    );
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+}
+fn bound_details(details: &mut Details) {
+    for value in details.values_mut() {
+        value.values = value
+            .values
+            .iter()
+            .take(64)
+            .map(|v| v.chars().take(32768).collect())
+            .collect();
+    }
+}
+fn extract_detail_values(path: &Path, info: &std::fs::Metadata) -> Result<Details, String> {
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    // SAFETY: read-only mapping, scoped to this synchronous extraction, as in read_uncached.
+    let mapping = unsafe { memmap2::Mmap::map(&file) };
+    let fallback;
+    let bytes: &[u8] = match &mapping {
+        Ok(mapped) => mapped,
+        Err(_) => {
+            fallback = std::fs::read(path).map_err(|e| e.to_string())?;
+            &fallback
+        }
+    };
+    // requested_tags is a post-extraction filter in the backend. Extract once and
+    // keep only our small mapped values, never the complete tag collection.
+    let tags = ExifTool::with_options(Options {
+        duplicates: true,
+        ..Default::default()
+    })
+    .extract_info_from_bytes(bytes, path)
+    .map_err(|e| e.to_string())?;
+    let mut details = detail_values(&tags);
+    for packet in embedded_packets(bytes) {
+        if let Ok(mut source) = crate::t_xmp::source_details(&packet) {
+            for value in source.values_mut() {
+                value.source = value.source.replace("Sidecar XMP", "Embedded XMP");
+            }
+            details.extend(source);
+        }
+    }
+    let after = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if after.len() != info.len() || after.modified().ok() != info.modified().ok() {
+        return Err("Original changed while reading metadata".into());
+    }
+    bound_details(&mut details);
+    Ok(details)
+}
+pub fn read_details(
+    path: &Path,
+    force: bool,
+    section: &str,
+    refresh_key: Option<&str>,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Details, String> {
+    if !matches!(section, "source" | "capture" | "location") {
+        return Err("Unknown metadata section".into());
+    }
+    let info = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if crate::t_utils::is_cloud_only(&info) {
+        return Err("Original is not available locally".into());
+    }
+    let key = format!(
+        "{}:{:?}:{}",
+        path.display(),
+        info.modified().ok(),
+        info.len()
+    );
+    let shared = {
+        let mut cache = detail_cache().lock().map_err(|e| e.to_string())?;
+        if let Some(index) = cache.iter().position(|(k, _)| k == &key) {
+            let entry = cache.remove(index).unwrap();
+            let shared = entry.1.clone();
+            cache.push_back(entry);
+            shared
+        } else {
+            let shared = std::sync::Arc::new(std::sync::Mutex::new(DetailCacheEntry::default()));
+            cache.push_back((key, shared.clone()));
+            shared
+        }
+    };
+    // A per-file lock coalesces simultaneous section requests, including refreshes.
+    let result = (|| {
+        let mut entry = shared.lock().map_err(|e| e.to_string())?;
+        if cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Err("Metadata request cancelled".into());
+        }
+        if entry.embedded.is_none()
+            || (force && (refresh_key.is_none() || entry.refresh_key.as_deref() != refresh_key))
+        {
+            entry.embedded = Some(extract_detail_values(path, &info)?);
+            entry.refresh_key = refresh_key.map(str::to_owned);
+            entry.sidecar = None;
+        }
+        let mut details = entry.embedded.as_ref().unwrap().clone();
+        // Folded source sections never cause sidecar discovery or reading.
+        if section == "source" {
+            if let Some(path) = crate::t_xmp::find_xmp_sidecar(path) {
+                let sidecar_info = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+                if !crate::t_utils::is_cloud_only(&sidecar_info) {
+                    let key = format!(
+                        "{}:{:?}:{}",
+                        path.display(),
+                        sidecar_info.modified().ok(),
+                        sidecar_info.len()
+                    );
+                    let cached = entry.sidecar.as_ref().is_some_and(|(old, epoch, _)| {
+                        old == &key
+                            && (!force
+                                || (refresh_key.is_some() && epoch.as_deref() == refresh_key))
+                    });
+                    if !cached {
+                        use std::io::Read;
+                        let mut xml = String::new();
+                        std::fs::File::open(&path)
+                            .map_err(|e| e.to_string())?
+                            .take(16 * 1024 * 1024 + 1)
+                            .read_to_string(&mut xml)
+                            .map_err(|e| e.to_string())?;
+                        if xml.len() > 16 * 1024 * 1024 {
+                            return Err("XMP exceeds 16 MiB size limit".into());
+                        }
+                        let mut source = crate::t_xmp::source_details(&xml)?;
+                        bound_details(&mut source);
+                        entry.sidecar = Some((key, refresh_key.map(str::to_owned), source));
+                    }
+                    details.extend(entry.sidecar.as_ref().unwrap().2.clone());
+                }
+            }
+        }
+        details.retain(|key, _| match section {
+            "source" => matches!(
+                key.as_str(),
+                "title"
+                    | "creator"
+                    | "copyright"
+                    | "description"
+                    | "credit"
+                    | "source"
+                    | "usageTerms"
+                    | "rightsUrl"
+                    | "software"
+            ),
+            "capture" => matches!(
+                key.as_str(),
+                "flash"
+                    | "whiteBalance"
+                    | "exposureMode"
+                    | "exposureProgram"
+                    | "meteringMode"
+                    | "focalLength35mm"
+                    | "timeZone"
+            ),
+            "location" => matches!(key.as_str(), "direction" | "directionRef"),
+            _ => false,
+        });
+        Ok(details)
+    })();
+    drop(shared);
+    trim_detail_cache();
+    result
+}
+
+fn detail_values(tags: &[Tag]) -> Details {
+    detail_values_for(tags, false)
+}
+
+fn detail_values_for(tags: &[Tag], stored_only: bool) -> Details {
+    let mut result = Details::new();
+    let mappings: &[(&str, &[&str])] = &[
+        ("title", &["Title", "ObjectName"]),
+        ("creator", &["Creator", "By-line", "Artist"]),
+        ("copyright", &["Rights", "CopyrightNotice", "Copyright"]),
+        (
+            "description",
+            &["Description", "Caption-Abstract", "ImageDescription"],
+        ),
+        ("credit", &["Credit"]),
+        ("source", &["Source"]),
+        ("usageTerms", &["UsageTerms"]),
+        ("rightsUrl", &["WebStatement"]),
+        ("software", &["CreatorTool", "Software"]),
+        ("flash", &["Flash"]),
+        ("whiteBalance", &["WhiteBalance"]),
+        ("exposureMode", &["ExposureMode"]),
+        ("exposureProgram", &["ExposureProgram"]),
+        ("meteringMode", &["MeteringMode"]),
+        ("focalLength35mm", &["FocalLengthIn35mmFormat"]),
+        ("timeZone", &["OffsetTimeOriginal"]),
+        ("direction", &["GPSImgDirection"]),
+        ("directionRef", &["GPSImgDirectionRef"]),
+        ("iccProfile", &["ProfileDescription"]),
+        ("colorSpace", &["ColorSpace"]),
+    ];
+    for (key, names) in mappings {
+        if !stored_only && matches!(*key, "iccProfile" | "colorSpace") {
+            continue;
+        }
+        if stored_only
+            && !matches!(
+                *key,
+                "creator" | "copyright" | "description" | "software" | "iccProfile" | "colorSpace"
+            )
+        {
+            continue;
+        }
+        let descriptive = matches!(
+            *key,
+            "title"
+                | "creator"
+                | "copyright"
+                | "description"
+                | "credit"
+                | "source"
+                | "usageTerms"
+                | "rightsUrl"
+                | "software"
+        );
+        let candidate = tags
+            .iter()
+            .filter(|tag| names.contains(&tag.name.as_str()))
+            .filter(|tag| {
+                if descriptive {
+                    matches!(tag.group.family0.as_str(), "XMP" | "IPTC" | "EXIF")
+                } else {
+                    matches!(
+                        tag.group.family0.as_str(),
+                        "EXIF" | "XMP" | "ICC_Profile" | "PNG" | "File" | "QuickTime"
+                    )
+                }
+            })
+            .filter(|tag| !matches!(tag.raw_value, Value::Binary(_) | Value::Undefined(_)))
+            .min_by_key(|tag| {
+                if descriptive {
+                    source_rank(tag)
+                } else {
+                    if tag.group.family0 == "XMP" { 1 } else { 0 }
+                }
+            });
+        if let Some(tag) = candidate {
+            let values = match &tag.raw_value {
+                Value::List(items) => items.iter().map(|v| v.to_display_string()).collect(),
+                _ => vec![tag.print_value.clone()],
+            };
+            let values: Vec<_> = values
+                .into_iter()
+                .filter(|v| !v.trim().is_empty() && !v.contains('\0'))
+                .map(|v| v.chars().take(32768).collect())
+                .take(64)
+                .collect();
+            if !values.is_empty() {
+                result.insert(
+                    (*key).into(),
+                    DetailValue {
+                        values,
+                        source: format!("{}:{}", tag.group.family0, tag.name),
+                    },
+                );
+            }
+        }
+    }
+    result
+}
+
+// Cancellation also covers tokens cancelled before their extraction command arrives.
+type DetailRequestFlag = std::sync::Arc<std::sync::atomic::AtomicBool>;
+type DetailRequestMap = std::collections::HashMap<String, (DetailRequestFlag, std::time::Instant)>;
+fn detail_requests() -> &'static std::sync::Mutex<DetailRequestMap> {
+    static REQUESTS: std::sync::OnceLock<std::sync::Mutex<DetailRequestMap>> =
+        std::sync::OnceLock::new();
+    REQUESTS.get_or_init(Default::default)
+}
+fn prune_detail_requests(requests: &mut DetailRequestMap) {
+    requests.retain(|_, (flag, time)| {
+        time.elapsed().as_secs() < 300 || std::sync::Arc::strong_count(flag) > 1
+    });
+}
+pub fn begin_detail_request(id: &str) -> Result<DetailRequestFlag, String> {
+    if id.is_empty() || id.len() > 128 {
+        return Err("Invalid metadata request token".into());
+    }
+    let mut requests = detail_requests().lock().map_err(|e| e.to_string())?;
+    prune_detail_requests(&mut requests);
+    if requests.len() >= 1024 && !requests.contains_key(id) {
+        return Err("Too many metadata requests".into());
+    }
+    Ok(requests
+        .entry(id.into())
+        .or_insert_with(|| (Default::default(), std::time::Instant::now()))
+        .0
+        .clone())
+}
+pub fn cancel_detail_requests(ids: &[String]) -> Result<(), String> {
+    if ids.len() > 32 {
+        return Err("Too many metadata cancellation tokens".into());
+    }
+    for id in ids {
+        begin_detail_request(id)?.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+pub struct DetailRequestGuard(pub String);
+impl Drop for DetailRequestGuard {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = detail_requests().lock() {
+            requests.remove(&self.0);
         }
     }
 }

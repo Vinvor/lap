@@ -514,6 +514,7 @@
             v-else-if="renderedRightPanelContent === 'info'"
             ref="fileInfoRef"
             :fileInfo="fileList[selectedItemIndex]"
+            :refresh-file="refreshFileInfoFromPanel"
             :navigator-viewport="infoNavigatorViewport"
             @navigator-visible="infoNavigatorVisible = $event"
             @navigator-navigate="navigateInfoPreview"
@@ -9335,6 +9336,18 @@ async function refreshGroupedRowsAfterDelete(fileIds: number[]) {
   pendingRestoreScrollTop.value = gridViewRef.value?.getScrollTop() ?? null;
   await initializeGroupedFileList(currentContentRequestId);
 }
+
+// Refresh panel data without reloading whichever image is selected after the await.
+const refreshFileInfoFromPanel = async (file: any) => {
+  const libraryId = libConfig._libraryId;
+  const fileId = Number(file.id);
+  const result = await refreshFileInfo(libraryId, fileId);
+  if (libraryId !== libConfig._libraryId || Number(file.id) !== fileId) return;
+  if (!result?.file) throw new Error('File info refresh failed');
+  Object.assign(file, result.file);
+  fileInfoRevision.value++;
+  void tauriEmit('tags-changed');
+};
 
 // update the file info from the file; isRefresh = "Refresh file info" menu action
 const updateFile = async (file: any, isRefresh = false) => {

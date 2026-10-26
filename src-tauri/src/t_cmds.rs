@@ -2788,6 +2788,52 @@ pub fn get_file_info(file_id: i64) -> Result<Option<AFile>, String> {
     AFile::get_file_info(file_id).map_err(|e| format!("Error while getting file info: {}", e))
 }
 
+/// Detail inspection never writes catalog organization metadata or downloads cloud files.
+#[tauri::command]
+pub async fn get_file_metadata_details(
+    file_id: i64,
+    section: String,
+    request_id: String,
+    force: Option<bool>,
+    refresh_key: Option<String>,
+) -> Result<crate::t_metadata::Details, String> {
+    let cancelled = crate::t_metadata::begin_detail_request(&request_id)?;
+    let _request = crate::t_metadata::DetailRequestGuard(request_id);
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Metadata request cancelled".into());
+    }
+    let file = AFile::get_file_info(file_id)?.ok_or("File not found")?;
+    let path = file.file_path.ok_or("File has no path")?;
+    static READS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _permit = READS
+        .get_or_init(|| tokio::sync::Semaphore::new(2))
+        .acquire()
+        .await
+        .map_err(|e| e.to_string())?;
+    if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("Metadata request cancelled".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Metadata request cancelled".into());
+        }
+        crate::t_metadata::read_details(
+            std::path::Path::new(&path),
+            force.unwrap_or(false),
+            &section,
+            refresh_key.as_deref(),
+            Some(&cancelled),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn cancel_file_metadata_requests(request_ids: Vec<String>) -> Result<(), String> {
+    crate::t_metadata::cancel_detail_requests(&request_ids)
+}
+
 /// Extract the embedded MP4 from an Android Motion Photo into the cache and
 /// return its path so the frontend can play it through the normal video
 /// pipeline (`prepare_video`). Cached by file size + mtime so an edited file

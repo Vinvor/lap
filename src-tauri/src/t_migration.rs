@@ -163,6 +163,11 @@ fn get_migrations() -> Vec<Migration> {
             description: "Cloud-only file state",
             sql: "",
         },
+        Migration {
+            version: 20,
+            description: "Stored image color profile, color space and bit depth",
+            sql: "",
+        },
     ]
 }
 
@@ -502,6 +507,17 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                     }
                 }
                 tx.commit().map_err(|e| e.to_string())?;
+            } else if migration.version == 20 {
+                let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+                for (column, definition) in [("icc_profile", "TEXT"), ("color_space", "TEXT"), ("bit_depth", "INTEGER")] {
+                    if !table_has_column(&tx, "afiles", column)? {
+                        tx.execute(&format!("ALTER TABLE afiles ADD COLUMN {column} {definition}"), [])
+                            .map_err(|e| format!("Migration {} failed adding {column}: {e}", migration.version))?;
+                    }
+                }
+                // Schema and version advance together; old rows remain NULL.
+                tx.pragma_update(None, "user_version", migration.version).map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| e.to_string())?;
             } else if !migration.sql.trim().is_empty() {
                 conn.execute_batch(migration.sql)
                     .map_err(|e| format!("Migration {} failed: {}", migration.version, e))?;
@@ -575,7 +591,7 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=17;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),19);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),20);
     }
 
     #[test]
@@ -589,6 +605,6 @@ mod album_filter_migration_tests {
         // Simulate migration completing before the version was persisted.
         conn.execute_batch("PRAGMA user_version=18;").unwrap();
         check_and_migrate(&conn).unwrap();
-        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 19);
+        assert_eq!(conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 20);
     }
 }

@@ -1546,6 +1546,9 @@ pub struct AFile {
     pub e_iso_speed: Option<String>,
     pub e_flash: Option<String>,    // flash
     pub e_orientation: Option<u32>, // orientation
+    pub icc_profile: Option<String>,
+    pub color_space: Option<String>,
+    pub bit_depth: Option<u16>,
 
     // gps info
     pub gps_latitude: Option<f64>,
@@ -2340,6 +2343,9 @@ impl AFile {
         let mut e_iso_speed: Option<String> = None;
         let mut e_flash: Option<String> = None;
         let mut e_orientation: Option<u32> = None;
+        let mut icc_profile = None;
+        let mut color_space = None;
+        let mut bit_depth = None;
         let mut gps_latitude: Option<f64> = None;
         let mut gps_longitude: Option<f64> = None;
         let mut gps_altitude: Option<f64> = None;
@@ -2653,6 +2659,13 @@ impl AFile {
             let deep = crate::t_metadata::read(Path::new(file_path));
             e_make = e_make.or(deep.make);
             e_model = e_model.or(deep.model);
+            e_artist = e_artist.or(deep.artist);
+            e_copyright = e_copyright.or(deep.copyright);
+            e_description = e_description.or(deep.description);
+            e_software = e_software.or(deep.software);
+            icc_profile = deep.icc_profile;
+            color_space = deep.color_space;
+            bit_depth = deep.bit_depth;
             e_lens_make = e_lens_make.or(deep.lens_make);
             e_lens_model = e_lens_model.or(deep.lens_model);
             if e_lens_make.is_none() {
@@ -2749,6 +2762,9 @@ impl AFile {
             e_iso_speed,
             e_flash,
             e_orientation,
+            icc_profile,
+            color_space,
+            bit_depth,
 
             gps_latitude,
             gps_longitude,
@@ -3049,9 +3065,9 @@ impl AFile {
                 is_favorite, rating, rotate, comments, has_tags,
                 e_make, e_model, e_date_time, e_software, e_artist, e_copyright, e_description, e_lens_make, e_lens_model, e_exposure_bias, e_exposure_time, e_f_number, e_focal_length, e_iso_speed, e_flash, e_orientation,
                 gps_latitude, gps_longitude, gps_altitude, geo_name, geo_admin1, geo_admin2, geo_cc,
-                last_scan_time, content_identifier, media_subtype, motion_photo_offset, cloud_only, metadata_pending
+                last_scan_time, content_identifier, media_subtype, motion_photo_offset, cloud_only, metadata_pending, icc_profile, color_space, bit_depth
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50)
             ON CONFLICT(folder_id, name) DO NOTHING",
             params![
                 self.folder_id,
@@ -3107,6 +3123,9 @@ impl AFile {
                 self.motion_photo_offset,
                 self.cloud_only,
                 self.metadata_pending,
+                self.icc_profile,
+                self.color_space,
+                self.bit_depth,
             ]
         ).map_err(|e| e.to_string())?;
         Ok(result)
@@ -3123,8 +3142,9 @@ impl AFile {
                 rating = ?13,
                 e_make = ?14, e_model = ?15, e_date_time = ?16, e_software = ?17, e_artist = ?18, e_copyright = ?19, e_description = ?20, e_lens_make = ?21, e_lens_model = ?22, e_exposure_bias = ?23, e_exposure_time = ?24, e_f_number = ?25, e_focal_length = ?26, e_iso_speed = ?27, e_flash = ?28, e_orientation = ?29,
                 gps_latitude = ?30, gps_longitude = ?31, gps_altitude = ?32, geo_name = ?33, geo_admin1 = ?34, geo_admin2 = ?35, geo_cc = ?36,
-                last_scan_time = ?37, content_identifier = ?38, media_subtype = ?39, motion_photo_offset = ?40
-            WHERE id = ?41",
+                last_scan_time = ?37, content_identifier = ?38, media_subtype = ?39, motion_photo_offset = ?40,
+                icc_profile = ?41, color_space = ?42, bit_depth = ?43
+            WHERE id = ?44",
             params![
                 file.name,
                 file.name_pinyin,
@@ -3170,6 +3190,9 @@ impl AFile {
                 file.content_identifier,
                 file.media_subtype,
                 file.motion_photo_offset,
+                file.icc_profile,
+                file.color_space,
+                file.bit_depth,
                 file_id,
             ]
         ).map_err(|e| e.to_string())?;
@@ -3334,7 +3357,8 @@ impl AFile {
                 a.motion_photo_offset,
                 {} AS album_visible,
                 a.cloud_only,
-                a.metadata_pending
+                a.metadata_pending,
+                a.icc_profile, a.color_space, a.bit_depth
             FROM afiles a
             LEFT JOIN afolders b ON a.folder_id = b.id
             LEFT JOIN albums c ON b.album_id = c.id
@@ -3417,6 +3441,9 @@ impl AFile {
             album_visible: row.get(56)?,
             cloud_only: row.get(57)?,
             metadata_pending: row.get(58)?,
+            icc_profile: row.get(59)?,
+            color_space: row.get(60)?,
+            bit_depth: row.get(61)?,
         })
     }
 
@@ -10124,6 +10151,9 @@ fn create_db_internal() -> Result<(), String> {
             e_iso_speed TEXT,
             e_flash TEXT,
             e_orientation INTEGER,
+            icc_profile TEXT,
+            color_space TEXT,
+            bit_depth INTEGER,
             gps_latitude REAL,
             gps_longitude REAL,
             gps_altitude REAL,
@@ -10230,6 +10260,11 @@ fn create_db_internal() -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_afiles_lens_make_model ON afiles(e_lens_make, e_lens_model)",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_afiles_artist ON afiles(e_artist COLLATE NOCASE)",
         [],
     )
     .map_err(|e| e.to_string())?;

@@ -3188,3 +3188,63 @@ mod export_tests {
         );
     }
 }
+
+/// Source details are independent of organization import and preserve explicit empty properties.
+pub(crate) fn source_details(content: &str) -> Result<crate::t_metadata::Details, String> {
+    let root = parse_xml(content)?;
+    let mut properties = Vec::new();
+    collect_properties(&root, &mut properties);
+    let mut details = crate::t_metadata::Details::new();
+    for (key, uri, name) in [
+        ("title", NS_DC, "title"),
+        ("creator", NS_DC, "creator"),
+        ("copyright", NS_DC, "rights"),
+        ("description", NS_DC, "description"),
+        ("credit", "http://ns.adobe.com/photoshop/1.0/", "Credit"),
+        ("source", "http://ns.adobe.com/photoshop/1.0/", "Source"),
+        (
+            "usageTerms",
+            "http://ns.adobe.com/xap/1.0/rights/",
+            "UsageTerms",
+        ),
+        (
+            "rightsUrl",
+            "http://ns.adobe.com/xap/1.0/rights/",
+            "WebStatement",
+        ),
+        ("software", NS_XMP, "CreatorTool"),
+    ] {
+        if let Some(node) = properties.iter().find(|n| n.uri == uri && n.name == name) {
+            let container = node
+                .children
+                .iter()
+                .find(|n| n.uri == NS_RDF && matches!(n.name.as_str(), "Seq" | "Bag" | "Alt"));
+            let values = if let Some(container) = container {
+                container
+                    .children
+                    .iter()
+                    .filter(|n| n.uri == NS_RDF && n.name == "li")
+                    .map(|n| match n.lang.as_deref() {
+                        Some(lang) if lang != "x-default" => format!("[{lang}] {}", n.text.trim()),
+                        _ => n.text.trim().to_owned(),
+                    })
+                    .collect()
+            } else {
+                vec![node
+                    .attributes
+                    .iter()
+                    .find(|a| a.uri == NS_RDF && a.name == "resource")
+                    .map(|a| a.text.clone())
+                    .unwrap_or_else(|| node.value())]
+            };
+            details.insert(
+                key.into(),
+                crate::t_metadata::DetailValue {
+                    values,
+                    source: format!("Sidecar XMP:{name}"),
+                },
+            );
+        }
+    }
+    Ok(details)
+}

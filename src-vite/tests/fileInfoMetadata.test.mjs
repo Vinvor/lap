@@ -16,6 +16,8 @@ function section(key) {
 }
 async function render(key, overrides = {}) {
   const context = {
+    detailSections: {source:{loading:false}},
+    sourceDetailRows: [{ key: "description", value: "ORIGINAL SOURCE TEXT", source: "EXIF", label: "file_info.detail_fields.description" }], detailsLoading: false, detailsError: false,
     showOrganizationPanel: true, showSourceMetadataPanel: false, hasSourceMetadata: true,
     toggleOrganization() {}, toggleSourceMetadata() {}, emit() {},
     isPrimaryGeneralInfo: false, displayTags: [], fileCollections: [], filePersons: [],
@@ -24,6 +26,7 @@ async function render(key, overrides = {}) {
   };
   const app = createSSRApp({ data: () => context, render: compile(section(key)) });
   app.config.globalProperties.$t = key => key;
+  app.component('SmoothHeight', { setup: (_, { slots }) => () => slots.default?.() });
   for (const name of ['IconRight', 'FavoriteRatingControl', 'TButton', 'IconRotate', 'IconBookmark', 'IconPerson']) {
     app.component(name, { render: () => null });
   }
@@ -32,7 +35,7 @@ async function render(key, overrides = {}) {
 
 test('organization keeps catalog controls on the companion tab and hides empty descriptions', async () => {
   const html = await render('organization');
-  assert.match(html, /file_info.marks/);
+  assert.doesNotMatch(html, /file_info.marks/);
   assert.doesNotMatch(html, /file_info.comment/);
   assert.doesNotMatch(html, /<template[\s>]/, 'description must be visible DOM, not inert template content');
   assert.doesNotMatch(html, /—/);
@@ -47,12 +50,12 @@ test('source metadata is hidden until expanded and retains the original descript
   assert.doesNotMatch(await render('source_metadata'), /ORIGINAL SOURCE TEXT/);
   const expanded = await render('source_metadata', { showSourceMetadataPanel: true });
   assert.match(expanded, /ORIGINAL SOURCE TEXT/);
-  assert.match(expanded, /file_info.source_description/);
+  assert.match(expanded, /file_info.detail_fields.description/);
 });
 
 test('location accepts zero coordinates and rejects missing or invalid coordinates', () => {
   const start = source.indexOf('const hasCoordinates = computed(');
-  const end = source.indexOf('const hasCaptureInfo', start);
+  const end = source.indexOf('const cameraText', start);
   assert.ok(start >= 0 && end > start);
   const valid = fileInfo => new Function('computed', 'props', `${source.slice(start, end)}; return hasCoordinates.value;`)(computed, { fileInfo });
   for (const [lat, lon, expected] of [[0,0,true], ['0','120',true], [null,0,false], ['',0,false], [91,0,false], [0,181,false], ['bad',0,false]]) {
@@ -66,9 +69,9 @@ test('capture and location sections are hidden only when all their displayed dat
   const end = source.indexOf('const showBasicInfoPanel', start);
   assert.ok(start >= 0 && end > start);
   const evaluate = (fileInfo, coordinates = false, location = '') => new Function(
-    'computed', 'props', 'hasCoordinates', 'formatGeoLocation', 'hasAltitude',
+    'computed', 'props', 'hasCoordinates', 'formatGeoLocation', 'hasAltitude', 'detailsLoaded', 'captureDetailRows', 'locationDetailRows', 'sourceDetailRows', 'detailSections', 'cameraText', 'exposureText', 'captureTimeText',
     `${source.slice(start, end)}; return [hasCaptureInfo.value, hasLocationInfo.value];`,
-  )(computed, { fileInfo }, { value: coordinates }, () => location, { value: fileInfo?.gps_altitude != null });
+  )(computed, { fileInfo }, { value: coordinates }, () => location, { value: fileInfo?.gps_altitude != null }, { value: true }, { value: [] }, { value: [] }, { value: [] }, {value:{capture:{loaded:true},location:{loaded:true},source:{loaded:true}}}, {value: fileInfo.e_make || fileInfo.e_model || ''}, {value: ['e_focal_length','e_exposure_time','e_f_number','e_iso_speed','e_exposure_bias'].map(k=>fileInfo[k] || '').join('').trim()}, {value: fileInfo.e_date_time && fileInfo.taken_date ? 'date' : ''});
   assert.deepEqual(evaluate({}), [false, false]);
   assert.deepEqual(evaluate({ e_make: '  ', e_model: null }), [false, false]);
   for (const key of ['e_make', 'e_model', 'e_lens_model', 'e_focal_length', 'e_exposure_time', 'e_f_number', 'e_iso_speed', 'e_exposure_bias']) {
@@ -104,15 +107,16 @@ test('source metadata section is absent when all source fields are empty', async
   const start = source.indexOf('const hasSourceMetadata = computed(');
   const end = source.indexOf('const showBasicInfoPanel', start);
   assert.ok(start >= 0 && end > start);
-  const hasData = fileInfo => new Function('computed', 'props', `${source.slice(start, end)}; return hasSourceMetadata.value;`)(computed, { fileInfo });
-  for (const info of [null, {}, { e_software: '', e_artist: null, e_copyright: '  ', e_description: '' }]) assert.equal(hasData(info), false);
-  for (const field of ['e_software', 'e_artist', 'e_copyright', 'e_description']) assert.equal(hasData({ [field]: 'value' }), true);
+  const hasData = (loaded, rows) => new Function('computed', 'detailsLoaded', 'sourceDetailRows', 'detailSections', 'showSourceMetadataPanel', `${source.slice(start, end)}; return hasSourceMetadata.value;`)(computed, {value:loaded}, {value:rows}, {value:{source:{loaded}}}, {value:false});
+  assert.equal(hasData(false, []), true);
+  assert.equal(hasData(true, []), false);
+  assert.equal(hasData(true, [{value:'Author'}]), true);
 });
 
 
 test('altitude accepts sea level and negative elevations but not missing or invalid values', () => {
   const start = source.indexOf('const hasAltitude = computed(');
-  const end = source.indexOf('const hasCaptureInfo', start);
+  const end = source.indexOf('const cameraText', start);
   assert.ok(start >= 0 && end > start);
   const valid = altitude => new Function('computed', 'props', `${source.slice(start, end)}; return hasAltitude.value;`)(computed, { fileInfo: { gps_altitude: altitude } });
   for (const altitude of [0, -12.5, 1234, '0']) assert.equal(valid(altitude), true);
