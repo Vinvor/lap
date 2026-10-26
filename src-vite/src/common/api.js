@@ -2244,11 +2244,11 @@ export async function setXmpImportSettings(importXmpSidecars) {
   }
 }
 
-export async function importXmpMetadata(fileIds) {
+export async function saveXmpMetadata(fileIds, libraryId) {
   try {
-    return await invoke('import_xmp_metadata', { fileIds });
+    return await invoke('save_xmp_metadata', { fileIds, libraryId });
   } catch (error) {
-    console.error('Failed to import XMP metadata:', error);
+    console.error('Failed to save XMP metadata:', error);
     throw error;
   }
 }

@@ -284,7 +284,7 @@
   "search": {
     "title": "Поиск",
     "similar_images": "Связанные фотографии",
-    "image_search_placeholder": "Поиск изображений, имён файлов или комментариев",
+    "image_search_placeholder": "Поиск изображений, имён файлов или описаний",
     "matches": "Совпадения",
     "unknown_location": "Неизвестное место",
     "unknown_camera": "Неизвестная камера",
@@ -740,9 +740,10 @@
       "show_info": "Показать информацию",
       "remove_from_collection": "Удалить из коллекции",
       "create_montage": "Создать коллаж",
-      "import_xmp": "Импортировать из XMP",
-      "xmp_import_success": "Метаданные импортированы из {count} XMP-файла(ов)",
-      "xmp_import_failed": "Не удалось импортировать XMP для {count} файлов"
+      "save_xmp": "Сохранить метаданные в XMP",
+      "xmp_save_success": "Метаданные XMP сохранены для {count} файлов",
+      "xmp_save_failed": "Не удалось сохранить XMP для {count} файлов",
+      "comment": "Описание…"
     },
     "calendar": {
       "monthly": "Месяц",
@@ -791,7 +792,7 @@
       "unfavorite": "Убрать из избранного",
       "tag": "Теги...",
       "collection": "Коллекции...",
-      "comment": "Комментарии...",
+      "comment": "Описание…",
       "rotate": "Повернуть вид"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Не удалось удалить тег."
     },
     "edit_comment": {
-      "title": "Редактировать комментарий",
-      "placeholder": "Комментарий",
+      "title": "Изменить описание",
+      "placeholder": "Введите описание",
       "ok": "Сохранить"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Высота над у.м.",
     "geo_location": "Место",
     "tags": "Теги",
-    "comment": "Комментарий",
-    "capture_settings": "Параметры съёмки"
+    "comment": "Описание",
+    "capture_settings": "Экспозиция",
+    "organization": "Организация",
+    "file": "Файл",
+    "capture": "Съёмка",
+    "source_metadata": "Метаданные исходного файла",
+    "source_description": "Исходное описание",
+    "coordinates": "Координаты"
   },
   "map": {
     "show_map": "Показать карту",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Встроенный",
       "source_rendered": "Рендеринг",
       "source_brightened": "Осветлённая",
-      "preview_mode": "Режим предпросмотра RAW",
-      "section_xmp": "XMP-файлы",
-      "xmp_import": "Импорт метаданных XMP",
-      "xmp_import_hint": "Чтение рейтингов, тегов, флагов отбора и комментариев из файлов .xmp"
+      "preview_mode": "Режим предпросмотра RAW"
+    },
+    "metadata": {
+      "title": "Метаданные",
+      "section_import": "Импорт метаданных",
+      "import": "Из EXIF, IPTC и XMP",
+      "import_hint": "Импортировать избранное, оценки, отметки отбора, теги и описания при сканировании и обновлении, сохраняя локальные изменения."
     },
     "browse": {
       "section_album": "Папка альбома",
@@ -1425,7 +1435,7 @@
         "Место",
         "Камера",
         "Объектив",
-        "Настройки"
+        "Экспозиция"
       ],
       "show_thumbnail_badges": "Значки на миниатюрах",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Оценить на 5 звёзд",
         "edit_tags": "Теги",
         "edit_collections": "Коллекции",
-        "edit_comment": "Комментарий",
+        "edit_comment": "Описание",
         "rotate": "Повернуть по часовой стрелке",
         "rotate_counterclockwise": "Повернуть против часовой стрелки",
         "thumbnail_increase": "Увеличить миниатюры",

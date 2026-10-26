@@ -121,9 +121,9 @@ export const useFileMenuItems = (
         action: createAction('index-cloud-files'),
       },
       {
-        label: String(localeMsg.value.menu.file.import_xmp || 'Import from XMP'),
+        label: String(localeMsg.value.menu.file.save_xmp || 'Save Metadata to XMP'),
         disabled: unavailable || selectionCount === 0,
-        action: createAction('import-xmp'),
+        action: createAction('save-xmp'),
       },
     ];
   };
@@ -330,8 +330,8 @@ export const useFileMenuItems = (
         action: createAction('refresh-file-info')
       },
       {
-        label: String(localeMsg.value.menu.file.import_xmp || 'Import from XMP'),
-        action: createAction('import-xmp'),
+        label: String(localeMsg.value.menu.file.save_xmp || 'Save Metadata to XMP'),
+        action: createAction('save-xmp'),
       },
       {
         label: localeMsg.value.menu.file.set_as,

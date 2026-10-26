@@ -784,7 +784,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          updateFileInfo, refreshFileInfo, getSupportedFormatExtensions, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
-         listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, importXmpMetadata } from '@/common/api';
+         listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
 import { config, libConfig } from '@/common/config';
 import { createThumbnailScheduler } from '@/common/thumbnailScheduler';
 import {
@@ -1164,11 +1164,21 @@ function startSelectedFileRefresh(freeSpace = false) {
 }
 async function finishSelectedFileRefresh(results: Array<{ file: any; size_delta: number; skipped: boolean }>) {
   const selection = fileRefreshSelection.value;
-  // Skipped cloud-only files are unchanged; regenerating their thumbnails would download them.
-  results = results.filter(result => !result.skipped);
   if (!selection || selection.libraryId !== libConfig._libraryId || results.length === 0) return;
-  for (const { file } of results) clearCachedThumbnailDataUrl(file.id, config.settings.thumbnailSize);
+  // A cloud-only original can stay unread while its local XMP was imported.
+  // Apply those metadata values without regenerating/downloading thumbnails.
+  if (selection.requestId === currentContentRequestId) {
+    const skipped = new Map(results.filter(result => result.skipped).map(result => [Number(result.file.id), result.file]));
+    for (const file of fileList.value) {
+      const updated = skipped.get(Number(file?.id));
+      if (updated) Object.assign(file, updated);
+    }
+  }
   fileInfoRevision.value++;
+  void tauriEmit('tags-changed');
+  results = results.filter(result => !result.skipped);
+  if (!results.length) return;
+  for (const { file } of results) clearCachedThumbnailDataUrl(file.id, config.settings.thumbnailSize);
   if (selection.requestId !== currentContentRequestId) return;
   const scrollTop = gridViewRef.value?.getScrollTop();
   const loadedFiles = new Map(fileList.value.filter(isRealFileItem).map(file => [Number(file.id), file]));
@@ -4363,38 +4373,18 @@ function handleItemAction(payload: { action: string, index: number }) {
     'reveal': () => revealPath(fileList.value[selectedItemIndex.value].file_path),
     'refresh-file-info': () => selectMode.value ? startSelectedFileRefresh() : void updateFile(fileList.value[selectedItemIndex.value], true),
     'index-cloud-files': () => startSelectedFileRefresh(true),
-    'import-xmp': async () => {
+    'save-xmp': async () => {
       const ids = selectMode.value
         ? Array.from(selectedFileIds)
         : [fileList.value[selectedItemIndex.value]?.id].filter(Boolean);
       if (!ids.length) return;
       try {
-        const result = await importXmpMetadata(ids);
-        const importedIds = result.importedIds;
-        const count = importedIds.length;
-        if (count > 0) {
-          const refreshed = await getFilesByIds(importedIds);
-          if (Array.isArray(refreshed)) {
-            const map = new Map(refreshed.map((r: any) => [Number(r.id), r]));
-            for (let i = 0; i < fileList.value.length; i++) {
-              const item = fileList.value[i];
-              if (item && map.has(Number(item.id))) {
-                Object.assign(item, map.get(Number(item.id)));
-              }
-            }
-          }
-          fileInfoRevision.value++;
-          await tauriEmit('tags-changed');
+        const result = await saveXmpMetadata(ids, libConfig._libraryId);
+        if (result.savedIds.length) toast.success(t('menu.file.xmp_save_success', { count: result.savedIds.length }));
+        if (result.failures.length) {
+          toast.error(t('menu.file.xmp_save_failed', { count: result.failures.length }) + ': ' + result.failures[0].error);
         }
-        toast.info(t('menu.file.xmp_import_success', { count }));
-        if (result.failures.length > 0) {
-          console.error('XMP import failures:', result.failures);
-          toast.error(t('menu.file.xmp_import_failed', { count: result.failures.length }));
-        }
-      } catch (error) {
-        console.error('XMP import failed:', error);
-        toast.error(String(error));
-      }
+      } catch (error) { toast.error(String(error)); }
     },
     'favorite': toggleFavorite,
     'rotate': clickRotate,
@@ -9354,12 +9344,16 @@ const updateFile = async (file: any, isRefresh = false) => {
     // the forced thumbnail and image reload that would download it.
     const refreshed = isRefresh ? await refreshFileInfo(libConfig._libraryId, file.id) : null;
     if (refreshed?.skipped) {
+      if (refreshed.file) Object.assign(file, refreshed.file);
+      fileInfoRevision.value++;
+      void tauriEmit('tags-changed');
       toast.success(localeMsg.value.tooltip.update_image.success);
       return;
     }
     const updatedFile = isRefresh ? refreshed?.file : await updateFileInfo(file.id, file.file_path);
     if (updatedFile) {
       Object.assign(file, updatedFile);
+      if (isRefresh) { fileInfoRevision.value++; void tauriEmit('tags-changed'); }
       await updateThumbForFile(file);
       await updateSelectedImage(selectedItemIndex.value);
 

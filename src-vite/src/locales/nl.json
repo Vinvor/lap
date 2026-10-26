@@ -284,7 +284,7 @@
   "search": {
     "title": "Zoeken",
     "similar_images": "Verwante foto's",
-    "image_search_placeholder": "Zoek in afbeeldingen, bestandsnamen of opmerkingen",
+    "image_search_placeholder": "Zoek afbeeldingen, bestandsnamen of beschrijvingen",
     "matches": "Resultaten",
     "unknown_location": "Onbekende locatie",
     "unknown_camera": "Onbekende camera",
@@ -740,9 +740,10 @@
       "show_info": "Info tonen",
       "remove_from_collection": "Uit collectie halen",
       "create_montage": "Collage maken",
-      "import_xmp": "Importeren uit XMP",
-      "xmp_import_success": "Metadata geïmporteerd uit {count} XMP-sidecar(s)",
-      "xmp_import_failed": "XMP importeren mislukt voor {count} bestand(en)"
+      "save_xmp": "Metadata opslaan in XMP",
+      "xmp_save_success": "XMP-metadata opgeslagen voor {count} bestand(en)",
+      "xmp_save_failed": "XMP opslaan mislukt voor {count} bestand(en)",
+      "comment": "Beschrijving…"
     },
     "calendar": {
       "monthly": "Per maand",
@@ -791,7 +792,7 @@
       "unfavorite": "Geen favoriet",
       "tag": "Tags...",
       "collection": "Collecties...",
-      "comment": "Opmerkingen...",
+      "comment": "Beschrijving…",
       "rotate": "Weergave draaien"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Kan tag niet verwijderen."
     },
     "edit_comment": {
-      "title": "Opmerking bewerken",
-      "placeholder": "Voer een opmerking in",
+      "title": "Beschrijving bewerken",
+      "placeholder": "Voer een beschrijving in",
       "ok": "Opslaan"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Hoogte",
     "geo_location": "Locatie",
     "tags": "Tags",
-    "comment": "Opmerking",
-    "capture_settings": "Opname-instellingen"
+    "comment": "Beschrijving",
+    "capture_settings": "Belichting",
+    "organization": "Organisatie",
+    "file": "Bestand",
+    "capture": "Opname",
+    "source_metadata": "Bronmetadata",
+    "source_description": "Oorspronkelijke beschrijving",
+    "coordinates": "Coördinaten"
   },
   "map": {
     "show_map": "Kaart tonen",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Ingesloten",
       "source_rendered": "Gerenderd",
       "source_brightened": "Helderder",
-      "preview_mode": "RAW-voorbeeldmodus",
-      "section_xmp": "XMP-sidecars",
-      "xmp_import": "XMP-metadata importeren",
-      "xmp_import_hint": "Lees beoordelingen, tags, selectievlaggen en opmerkingen uit .xmp-sidecars"
+      "preview_mode": "RAW-voorbeeldmodus"
+    },
+    "metadata": {
+      "title": "Metagegevens",
+      "section_import": "Metagegevens importeren",
+      "import": "Uit EXIF, IPTC en XMP",
+      "import_hint": "Importeer favorieten, beoordelingen, schiftmarkeringen, tags en beschrijvingen bij scans en vernieuwingen, met behoud van lokale wijzigingen."
     },
     "browse": {
       "section_album": "Albummap",
@@ -1425,7 +1435,7 @@
         "Locatie",
         "Camera",
         "Objectief",
-        "Opname-instellingen"
+        "Belichting"
       ],
       "show_thumbnail_badges": "Badges op miniaturen tonen",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "5 sterren geven",
         "edit_tags": "Tags",
         "edit_collections": "Collecties",
-        "edit_comment": "Opmerking",
+        "edit_comment": "Beschrijving",
         "rotate": "Weergave draaien (rechtsom)",
         "rotate_counterclockwise": "Weergave draaien (linksom)",
         "thumbnail_increase": "Miniaturen vergroten",

@@ -284,7 +284,7 @@
   "search": {
     "title": "Recherche",
     "similar_images": "Photos associées",
-    "image_search_placeholder": "Rechercher des images, noms de fichiers ou commentaires",
+    "image_search_placeholder": "Rechercher des images, noms de fichiers ou descriptions",
     "matches": "Résultats",
     "unknown_location": "Lieu inconnu",
     "unknown_camera": "Appareil photo inconnu",
@@ -740,9 +740,10 @@
       "show_info": "Afficher info",
       "remove_from_collection": "Retirer de la collection",
       "create_montage": "Créer un collage",
-      "import_xmp": "Importer depuis XMP",
-      "xmp_import_success": "Métadonnées importées depuis {count} fichier(s) XMP",
-      "xmp_import_failed": "Échec de l’import XMP pour {count} fichier(s)"
+      "save_xmp": "Enregistrer les métadonnées dans XMP",
+      "xmp_save_success": "Métadonnées XMP enregistrées pour {count} fichier(s)",
+      "xmp_save_failed": "Échec de l’enregistrement XMP pour {count} fichier(s)",
+      "comment": "Description…"
     },
     "calendar": {
       "monthly": "Mensuel",
@@ -791,7 +792,7 @@
       "unfavorite": "Retirer favori",
       "tag": "Tags...",
       "collection": "Collections...",
-      "comment": "Commentaires...",
+      "comment": "Description…",
       "rotate": "Pivoter la vue"
     },
     "sort": {
@@ -999,8 +1000,8 @@
       "error": "Impossible de supprimer le tag."
     },
     "edit_comment": {
-      "title": "Modifier commentaire",
-      "placeholder": "Commentaire",
+      "title": "Modifier la description",
+      "placeholder": "Saisir une description",
       "ok": "Enregistrer"
     },
     "select_folder": {
@@ -1199,8 +1200,14 @@
     "gps_altitude": "Altitude",
     "geo_location": "Lieu",
     "tags": "Tags",
-    "comment": "Commentaire",
-    "capture_settings": "Paramètres prise"
+    "comment": "Description",
+    "capture_settings": "Exposition",
+    "organization": "Organisation",
+    "file": "Fichier",
+    "capture": "Prise de vue",
+    "source_metadata": "Métadonnées du fichier source",
+    "source_description": "Description originale",
+    "coordinates": "Coordonnées"
   },
   "map": {
     "show_map": "Voir carte",
@@ -1363,10 +1370,13 @@
       "source_embedded": "Intégré",
       "source_rendered": "Rendu",
       "source_brightened": "Éclaircie",
-      "preview_mode": "Mode d'aperçu RAW",
-      "section_xmp": "Fichiers annexes XMP",
-      "xmp_import": "Importer les métadonnées XMP",
-      "xmp_import_hint": "Lire les notes, mots-clés, drapeaux de tri et commentaires depuis les fichiers .xmp"
+      "preview_mode": "Mode d'aperçu RAW"
+    },
+    "metadata": {
+      "title": "Métadonnées",
+      "section_import": "Importer les métadonnées",
+      "import": "Depuis EXIF, IPTC et XMP",
+      "import_hint": "Importer les favoris, notes, marqueurs de sélection, étiquettes et descriptions lors des analyses et actualisations, en conservant les modifications locales."
     },
     "browse": {
       "section_album": "Dossier d'album",
@@ -1425,7 +1435,7 @@
         "Lieu",
         "Appareil",
         "Objectif",
-        "Paramètres"
+        "Exposition"
       ],
       "show_thumbnail_badges": "Afficher les badges sur les miniatures",
       "thumbnail_badge_options": [
@@ -1603,7 +1613,7 @@
         "rate_five": "Noter 5 étoiles",
         "edit_tags": "Étiquettes",
         "edit_collections": "Collections",
-        "edit_comment": "Commentaire",
+        "edit_comment": "Description",
         "rotate": "Pivoter la vue dans le sens horaire",
         "rotate_counterclockwise": "Pivoter la vue dans le sens antihoraire",
         "thumbnail_increase": "Agrandir les miniatures",

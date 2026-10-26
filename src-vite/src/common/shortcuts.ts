@@ -339,7 +339,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: 'meta.comment',
     contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [{ code: 'KeyC', allowShift: true, label: 'C' }],
+    defaultBindings: [{ code: 'KeyD', allowShift: true, label: 'D' }],
   },
   {
     id: 'meta.rotate',

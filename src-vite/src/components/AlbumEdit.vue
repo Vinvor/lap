@@ -224,23 +224,23 @@
         <span class="font-bold uppercase text-[10px] tracking-widest">{{ $t('album.edit.section_scan_preview') }}</span>
       </div>
       <div class="grid grid-cols-[84px_1fr] gap-x-4 gap-y-1.5 items-center px-1 text-xs">
-        <div class="min-h-6 flex items-center text-[11px] text-base-content/45">{{ $t('album.edit.files_to_scan') }}</div>
-        <div class="min-h-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-base-content/75">
+        <div class="min-h-6 flex items-center text-[11px] text-base-content/30">{{ $t('album.edit.files_to_scan') }}</div>
+        <div class="min-h-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-base-content/70">
           <span v-if="previewError" class="text-warning">{{ $t('album.edit.preview_unavailable') }}</span>
           <template v-else>
             <span v-if="previewCount !== null">{{ $t('album.edit.files_count', { count: previewCount.toLocaleString(), size: formatFileSize(previewSize) }) }}</span>
-            <span v-if="previewLoading" class="flex items-center gap-1 text-[11px] text-base-content/45">
+            <span v-if="previewLoading" class="flex items-center gap-1 text-[11px] text-base-content/30">
               <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
               {{ $t(previewCount === null ? 'album.edit.files_counting' : 'album.edit.preview_updating') }}
             </span>
           </template>
         </div>
-        <div class="min-h-6 flex items-center text-[11px] text-base-content/45">{{ $t('album.edit.excluded_files') }}</div>
-        <div class="min-h-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-base-content/75">
+        <div class="min-h-6 flex items-center text-[11px] text-base-content/30">{{ $t('album.edit.excluded_files') }}</div>
+        <div class="min-h-6 flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px] text-base-content/70">
           <span v-if="previewError" class="text-warning">{{ $t('album.edit.preview_unavailable') }}</span>
           <template v-else>
             <span v-if="excludedPreviewCount !== null">{{ $t('album.edit.files_count', { count: excludedPreviewCount.toLocaleString(), size: formatFileSize(excludedPreviewSize) }) }}</span>
-            <span v-if="previewLoading" class="flex items-center gap-1 text-[11px] text-base-content/45">
+            <span v-if="previewLoading" class="flex items-center gap-1 text-[11px] text-base-content/30">
               <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
               {{ $t(excludedPreviewCount === null ? 'album.edit.files_counting' : 'album.edit.preview_updating') }}
             </span>

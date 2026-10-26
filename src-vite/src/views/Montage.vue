@@ -160,7 +160,7 @@
               <TButton buttonSize="small" :icon="IconCropPortrait" :selected="!landscape" :tooltip="$t('msgbox.montage.portrait')" @click="landscape = false" />
             </div>
           </div>
-          <div class="text-[11px] text-base-content/45">{{ $t('msgbox.montage.export', { size: exportLabel }) }}</div>
+          <div class="text-[11px] text-base-content/30">{{ $t('msgbox.montage.export', { size: exportLabel }) }}</div>
         </section>
 
         <section class="rounded-box p-3 space-y-3 border border-base-content/5 shadow-sm bg-base-300/30">
@@ -190,16 +190,16 @@
           <div v-if="mode === 'pile'" class="space-y-1">
             <div class="flex items-center justify-between gap-2">
               <label for="montage-rotation">{{ $t('msgbox.montage.random_rotation') }}</label>
-              <span class="text-base-content/45 tabular-nums">± {{ maxRotation }}°</span>
+              <span class="text-base-content/30 tabular-nums">± {{ maxRotation }}°</span>
             </div>
-            <SliderInput id="montage-rotation" v-model="maxRotation" :min="0" :max="30" :step="1" class="!w-full" />
+            <SliderInput id="montage-rotation" v-model="maxRotation" :min="0" :max="30" :step="1" class="w-full!" />
           </div>
           <div v-else class="space-y-1">
             <div class="flex items-center justify-between gap-2">
               <label for="montage-spacing">{{ $t('msgbox.montage.spacing') }}</label>
-              <span class="text-base-content/45 tabular-nums whitespace-nowrap">{{ toExportPx(spacing) }} px</span>
+              <span class="text-base-content/30 tabular-nums whitespace-nowrap">{{ toExportPx(spacing) }} px</span>
             </div>
-            <SliderInput id="montage-spacing" v-model="spacing" :min="0" :max="5" :step="0.25" class="!w-full" />
+            <SliderInput id="montage-spacing" v-model="spacing" :min="0" :max="5" :step="0.25" class="w-full!" />
           </div>
 
           <label class="flex items-center justify-between gap-2 cursor-pointer">
@@ -209,9 +209,9 @@
           <div :class="{ 'opacity-50': !borderOn }" class="space-y-1">
             <div class="flex items-center justify-between gap-2">
               <label for="montage-border">{{ $t('msgbox.montage.border_width') }}</label>
-              <span class="text-base-content/45 tabular-nums whitespace-nowrap">{{ toExportPx(border) }} px</span>
+              <span class="text-base-content/30 tabular-nums whitespace-nowrap">{{ toExportPx(border) }} px</span>
             </div>
-            <SliderInput id="montage-border" v-model="border" :min="0" :max="4" :step="0.25" class="!w-full" :disabled="!borderOn" />
+            <SliderInput id="montage-border" v-model="border" :min="0" :max="4" :step="0.25" class="w-full!" :disabled="!borderOn" />
           </div>
 
           <label class="flex items-center justify-between gap-2 cursor-pointer">
