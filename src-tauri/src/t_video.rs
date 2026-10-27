@@ -73,6 +73,12 @@ fn platform_video_url(file_path: &str) -> Result<String, String> {
     }
 }
 
+/// Resolve the original video's platform transport without compatibility processing.
+#[tauri::command]
+pub fn get_video_stream_url(file_path: String) -> Result<String, String> {
+    platform_video_url(&file_path)
+}
+
 /// Manages active FFmpeg/FFprobe processes, allowing per-player cancellation.
 pub struct VideoManager {
     pub active_processes: Mutex<HashMap<String, (u64, tokio::process::Child)>>,

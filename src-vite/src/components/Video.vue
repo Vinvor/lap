@@ -85,6 +85,7 @@ import { openFileWithApp } from '@/common/api';
 import zhCN from 'video.js/dist/lang/zh-CN.json';
 import {
   prepareVideo,
+  getVideoStreamUrl,
   cancelVideoPrepare,
   isWebViewVideoPlaybackDisabled,
   type VideoPrepareMode,
@@ -634,12 +635,26 @@ const loadVideo = async (filePath: string) => {
     }
   };
 
-  const loadDirect = (type: string | null) => {
+  const loadDirect = async (type: string | null) => {
     resetCompatibilityProcessing();
+    let playbackSrc: string;
+    try {
+      // Use the same Range-capable transport as prepared videos on Linux,
+      // without probing or copying the original MP4/M4V file.
+      playbackSrc = isLinux && /\.(mp4|m4v)$/i.test(filePath)
+        ? await getVideoStreamUrl(filePath)
+        : getAssetSrc(filePath);
+    } catch (error) {
+      if (currentLoadId !== currentLoadingId) return;
+      console.warn('[Video] Direct stream URL unavailable, preparing a compatible source...', error);
+      void loadPrepared('compatible');
+      return;
+    }
+    if (currentLoadId !== currentLoadingId) return;
     player.reset();
     const source = type
-      ? { src: getAssetSrc(filePath), type }
-      : { src: getAssetSrc(filePath) };
+      ? { src: playbackSrc, type }
+      : { src: playbackSrc };
     player.src(source);
 
     let directLoadTimer: ReturnType<typeof setTimeout> | null = null;

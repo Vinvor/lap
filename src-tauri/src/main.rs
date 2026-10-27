@@ -447,6 +447,7 @@ async fn main() {
             t_cmds::similar_has_scan,
             // video
             t_video::prepare_video,
+            t_video::get_video_stream_url,
             t_video::cancel_video_prepare,
             t_video::clear_video_cache,
             // backup / restore
