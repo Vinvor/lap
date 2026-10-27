@@ -18,6 +18,8 @@ export const clearFolderFileCounts = () => {
 
 export const getFolderFileCount = (path: string) => folderFileCounts.get(path) || 0;
 
+export const getCountedFolderPaths = () => Array.from(folderFileCounts.keys());
+
 /**
  * Creates and provides an album selection context.
  * Call this in the root component (AlbumList) to provide selection state to all descendants.

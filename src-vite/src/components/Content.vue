@@ -796,7 +796,7 @@ import {
 } from '@/common/thumbnailProfiles';
 import { getShortcutLabel, matchesShortcut, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import { getSmartTagById } from '@/common/smartTags';
-import { clearFolderFileCounts, setFolderFileCount } from '@/composables/useAlbumSelection';
+import { clearFolderFileCounts, setFolderFileCount, getCountedFolderPaths } from '@/composables/useAlbumSelection';
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
 import { CULLING, DATE_SORT, GROUP, LIB_ITEM, RATE, SIDEBAR, SELECTED_THUMBNAIL_LIMIT, RIGHT_PANEL_MIN_WIDTH, PANEL_ANIMATION_MS, MONTAGE_MAX_PHOTOS, LARGE_BATCH_CONFIRM_THRESHOLD, EXTERNAL_OPEN_WARNING_THRESHOLD } from '@/common/constants';
@@ -2767,7 +2767,8 @@ async function resolveCurrentAlbumImportDestination() {
   return resolveAlbumImportDestination(albumId, folderPath);
 }
 
-async function refreshImportedFiles(albumId: number) {
+async function refreshImportedFiles(albumId: number, folderPath: string) {
+  await refreshFolderSidebarCounts([folderPath]);
   await refreshAffectedAlbums([albumId]);
   await refreshLibraryTotalCount();
   await updateContent();
@@ -2825,15 +2826,8 @@ async function importFilesToFolder(target: { albumId: number; folderPath: string
     clearTimeout(progressTimer);
     if (!isCurrent()) return;
     if (fileImportSuccess.value > 0) {
-      const folderCounts = await getQueryCountAndSum({
-        searchFileName: '', searchFileType: config.search.fileType,
-        sortType: 0, sortOrder: 0, searchAllSubfolders: config.settings.showSubfolderFiles ? destination.folderPath : '',
-        searchFolder: config.settings.showSubfolderFiles ? '' : destination.folderPath,
-        startDate: 0, endDate: 0, calendarSort: 0, make: '', model: '', lensMake: '', lensModel: '',
-        locationAdmin1: '', locationName: '', isFavorite: false, rating: -1, cullingFlag: -1, tagId: 0, personId: 0,
-      });
+      await refreshFolderSidebarCounts([destination.folderPath]);
       if (!isCurrent()) return;
-      if (folderCounts) setFolderFileCount(destination.folderPath, Number(folderCounts[0] || 0));
       await refreshAffectedAlbums([destination.albumId], true);
       if (!isCurrent()) return;
       await refreshLibraryTotalCount();
@@ -2877,7 +2871,7 @@ async function pasteClipboardImage(target?: { albumId: number; folderPath?: stri
       toast.warning(t('msgbox.drop_import.no_clipboard_image'));
       return;
     }
-    await refreshImportedFiles(destination.albumId);
+    await refreshImportedFiles(destination.albumId, destination.folderPath);
     toast.success(t('msgbox.drop_import.success', { count: files.length }));
   } catch (error) {
     console.error('Failed to import clipboard image:', error);
@@ -3294,6 +3288,7 @@ async function clearContentInternalDrag(event?: PointerEvent) {
       let transferFailureCount = 0;
       let applyAllPolicy: FileConflictPolicy | null = null;
       const affectedAlbumIds = new Set<number>([albumId]);
+      const affectedFolderPaths = new Set<string>([destPath]);
       await withFileTransferBatch(async (batchId: number) => {
         for (const file of files) {
           if (!copy && file.folder_id === selected.id) continue;
@@ -3322,6 +3317,7 @@ async function clearContentInternalDrag(event?: PointerEvent) {
             const movedPath = await moveFile(file.id, file.file_path, selected.id, destPath, conflict.policy, batchId);
             if (movedPath) {
               done++;
+              affectedFolderPaths.add(getFolderPath(file.file_path));
               affectedAlbumIds.add(Number(file.album_id || 0));
             } else {
               transferFailureCount++;
@@ -3330,6 +3326,7 @@ async function clearContentInternalDrag(event?: PointerEvent) {
         }
       });
       if (done > 0) {
+        await refreshFolderSidebarCounts([...affectedFolderPaths]);
         await refreshAffectedAlbums(Array.from(affectedAlbumIds));
         await refreshLibraryTotalCount();
         await tauriEmit('refresh-content');
@@ -3469,6 +3466,58 @@ function updateCount(owner: any, itemId: string | number, count: number) {
     [String(itemId)]: Math.max(0, Number(count || 0)),
   };
 }
+
+async function refreshFolderSidebarCount(path: string) {
+  const libraryId = libConfig._libraryId;
+  const fileType = config.search.fileType;
+  const showSubfolderFiles = config.settings.showSubfolderFiles;
+  try {
+    const result = await getQueryCountAndSum({
+      searchFileName: '', searchFileType: fileType,
+      sortType: 0, sortOrder: 0, searchAllSubfolders: showSubfolderFiles ? path : '',
+      searchFolder: showSubfolderFiles ? '' : path,
+      startDate: 0, endDate: 0, calendarSort: 0, make: '', model: '', lensMake: '', lensModel: '',
+      locationAdmin1: '', locationName: '', isFavorite: false, rating: -1, cullingFlag: -1, tagId: 0, personId: 0,
+    });
+    if (result && libConfig._libraryId === libraryId
+      && config.search.fileType === fileType && config.settings.showSubfolderFiles === showSubfolderFiles) {
+      setFolderFileCount(path, Number(result[0] || 0));
+    }
+  } catch (error) {
+    console.error('Failed to refresh folder count:', error);
+  }
+}
+
+async function refreshFolderSidebarCounts(changedPaths: string[]) {
+  const libraryId = libConfig._libraryId;
+  const paths = new Map(changedPaths.filter(Boolean).map(path => [normalizePathForCompare(path), path]));
+  if (config.settings.showSubfolderFiles) {
+    for (const parent of getCountedFolderPaths()) {
+      if (changedPaths.some(path => path && isWithinRootPath(path, parent))) {
+        paths.set(normalizePathForCompare(parent), parent);
+      }
+    }
+  }
+  for (const path of paths.values()) {
+    if (libConfig._libraryId !== libraryId) return;
+    await refreshFolderSidebarCount(path);
+  }
+}
+
+// Do not publish a previous query's total after switching folders.
+const countedFolderRequestId = ref(-1);
+
+watch(
+  [totalFileCount, contentReady, isLoading, countedFolderRequestId],
+  () => {
+    const path = currentQueryParams.value.searchAllSubfolders || currentQueryParams.value.searchFolder;
+    if (countedFolderRequestId.value !== currentContentRequestId || currentQuerySource.value !== 'query' || !path
+      || !contentReady.value || isLoading.value || contentQueryRefreshPending
+      || !contentCountIsAuthoritative.value || tempViewMode.value !== 'none'
+      || !matchesRequestedSidebarCount({ source: 'album-folder', path })) return;
+    setFolderFileCount(path, Math.max(0, Number(totalFileCount.value || 0)));
+  },
+);
 
 function matchesRequestedSidebarCount(request: any) {
   switch (request?.source) {
@@ -5699,7 +5748,7 @@ onMounted( async() => {
       if (file) imported++;
     }
     if (imported > 0) {
-      await refreshImportedFiles(albumId);
+      await refreshImportedFiles(albumId, folderPath);
       toast.success(t('msgbox.drop_import.success', { count: imported }));
       return;
     }
@@ -5721,7 +5770,7 @@ onMounted( async() => {
         }
       }
       if (imported > 0) {
-        await refreshImportedFiles(albumId);
+        await refreshImportedFiles(albumId, folderPath);
         toast.success(t('msgbox.drop_import.success', { count: imported }));
         return;
       }
@@ -6899,6 +6948,7 @@ async function initializeGroupedFileList(requestId: number) {
   groupedModeActive.value = true;
   groupedTimelineGroups.value = normalized.groups;
   totalFileCount.value = normalized.totalItemCount;
+  countedFolderRequestId.value = requestId;
   totalRowCount.value = normalized.totalRowCount;
   totalFileSize.value = normalized.totalSize;
   contentCountIsAuthoritative.value = true;
@@ -7245,6 +7295,7 @@ async function getFileList(
     if (result) {
       clearSelectionForFileListUpdate();
       totalFileCount.value = result[0];
+      countedFolderRequestId.value = requestId;
       totalFileSize.value = result[1];
       contentCountIsAuthoritative.value = true;
       
@@ -8003,6 +8054,7 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
                   libConfig.album.folderPath !== folderPath
                 ) return;
                 if (syncResult?.current_folder_synced) {
+                  void refreshFolderSidebarCounts([folderPath]);
                   console.log(
                     `folder sync: ${syncResult.new_file_count} new, ${syncResult.updated_file_count} updated, ${syncResult.deleted_file_count} deleted, ${syncResult.rename_count || 0} renamed`
                   );
@@ -8652,6 +8704,7 @@ function rebuildSelectionAfterListMutation(selectedIds: Set<number>) {
 const onMoveTo = async () => {
   if (!await requireCurrentOriginals()) return;
   const affectedAlbumIds = new Set<number>();
+  const affectedFolderPaths = new Set<string>();
   const destPath = String(libConfig.destFolder.folderPath || '');
   const destAlbumId = Number(libConfig.destFolder.albumId || 0);
   const destLabel = getFolderName(destPath) || destPath;
@@ -8688,6 +8741,7 @@ const onMoveTo = async () => {
     );
     const successIds = successfulMoves.map(({ item }) => item.id);
     successfulMoves.forEach(({ item, movedFile }) => {
+      affectedFolderPaths.add(getFolderPath(item.file_path));
       console.log('onMoveTo:', movedFile);
       affectedAlbumIds.add(Number(item.album_id || 0));
     });
@@ -8718,6 +8772,7 @@ const onMoveTo = async () => {
     const sourceLabel = file.name;
     const movedFile = await moveFile(file.id, file.file_path, destFolderId, destPath);
     if(movedFile) {
+      affectedFolderPaths.add(getFolderPath(file.file_path));
       console.log('onMoveTo:', movedFile);
       affectedAlbumIds.add(Number(file.album_id || 0));
       removeFromFileList(selectedItemIndex.value);
@@ -8727,6 +8782,7 @@ const onMoveTo = async () => {
   }
 
   if (destAlbumId > 0) affectedAlbumIds.add(destAlbumId);
+  if (successCount > 0) await refreshFolderSidebarCounts([...affectedFolderPaths, destPath]);
   await refreshAffectedAlbums(Array.from(affectedAlbumIds));
   await refreshLibraryTotalCount();
   if (successCount > 0 && (groupedModeActive.value || effectiveGroupBy.value > 0)) {
@@ -8895,6 +8951,10 @@ const onMoveToFolder = async () => {
       : -1;
     rebuildSelectionAfterListMutation(remainingSelectedIds);
     toast.success(t('msgbox.move_to_folder.success', { source: sourceLabel, dest: getFolderName(destPath) || destPath }));
+    await refreshFolderSidebarCounts([
+      ...successfulMoves.map(({ file }) => getFolderPath(file.file_path)),
+      ...(libraryDestination ? [destPath] : []),
+    ]);
     await refreshAffectedAlbums(Array.from(affectedAlbumIds));
     await refreshLibraryTotalCount();
     // Moving a file changes its grouping key (for example, folder grouping).
@@ -8966,6 +9026,7 @@ const onCopyToFolder = async () => {
   if (successCount > 0) {
     toast.success(t('msgbox.copy_to_folder.success', { source: sourceLabel, dest: destLabel }));
     if (libraryDestination) {
+      await refreshFolderSidebarCounts([destPath]);
       await refreshAffectedAlbums([libraryDestination.albumId]);
       await refreshLibraryTotalCount();
       await tauriEmit('refresh-content');
@@ -8998,7 +9059,7 @@ async function handleDropUrls(
     }
   }
   if (imported > 0) {
-    await refreshImportedFiles(albumId);
+    await refreshImportedFiles(albumId, folderPath);
     toast.success(t('msgbox.drop_import.success', { count: imported }));
   } else {
     toast.warning(t('msgbox.drop_import.no_files'));
@@ -9026,13 +9087,16 @@ const getDeleteFilesErrorMessage = (permanently: boolean) =>
     : localeMsg.value.msgbox.move_to_trash.files_error;
 
 const onTrashAllDuplicates = async () => {
+  const libraryId = libConfig._libraryId;
   try {
     const permanently = deletePermanently.value;
     const result = await dedupDelete({ deleteAll: true, permanently });
+    if (libConfig._libraryId !== libraryId) return;
     const deletedCount = Number(result?.deletedCount || 0);
     const failedCount = Number(result?.failedCount || 0);
 
     if (deletedCount > 0) {
+      await refreshFolderSidebarCounts(result?.affectedFolderPaths || []);
       await updateContent(true);
       await dedupPaneRef.value?.refreshGroups();
       toast.success(getDeleteFilesSuccessMessage(deletedCount, permanently));
@@ -9070,6 +9134,11 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
   const permanently = deletePermanently.value;
   const deletedFileIds: number[] = [];
   const affectedAlbumIds = new Set<number>();
+  const affectedFolderPaths = new Set<string>();
+  const recordDeletedFile = (file: any) => {
+    affectedAlbumIds.add(Number(file.album_id || 0));
+    affectedFolderPaths.add(getFolderPath(file.file_path));
+  };
   let failedDeleteCount = 0;
   let otherFailureCount = 0;
   pendingTrashFailedItems.value = [];
@@ -9117,11 +9186,12 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
           throw new Error(`Failed to ${permanently ? 'permanently delete' : 'trash'} dedup files`);
         }
 
-        deletedItems.forEach(item => affectedAlbumIds.add(Number(item.album_id || 0)));
+        deletedItems.forEach(recordDeletedFile);
         deletedFileIds.push(...deletedItems.map(item => item.id));
       } else {
         const result = await dedupDelete({ fileIds: ids });
         if (result !== undefined) {
+          for (const path of result?.affectedFolderPaths || []) affectedFolderPaths.add(path);
           const resultDeletedIds = Array.isArray(result?.deletedFileIds)
             ? result.deletedFileIds.map((id: any) => Number(id)).filter((id: number) => id > 0)
             : [];
@@ -9134,7 +9204,7 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
           const deletedIdSet = new Set(deletedFileIds);
           fileList.value
             .filter(file => deletedIdSet.has(Number(file?.id)))
-            .forEach(file => affectedAlbumIds.add(Number(file.album_id || 0)));
+            .forEach(recordDeletedFile);
           failedDeleteCount = Number(result?.failedCount || 0);
           if (trashFailedIdSet.size > 0) {
             pendingTrashFailedDedupGroupKey.value = dedupTrashGroupKey.value;
@@ -9185,7 +9255,7 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
         throw new Error(`Failed to ${permanently ? 'permanently delete' : 'trash'} selected files`);
       }
 
-      deletedItems.forEach(item => affectedAlbumIds.add(Number(item.album_id || 0)));
+      deletedItems.forEach(recordDeletedFile);
       deletedFileIds.push(...deletedItems.map(item => item.id));
       const remainingSelectedIds = new Set(
         selectedItems
@@ -9220,7 +9290,7 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
       if (!deletedIdSet.has(Number(selectedFile.id))) {
         throw new Error(`Failed to ${permanently ? 'permanently delete' : 'trash'} file: ${selectedFile.file_path}`);
       }
-      affectedAlbumIds.add(Number(selectedFile.album_id || 0));
+      recordDeletedFile(selectedFile);
       deletedFileIds.push(selectedFile.id);
       failedDeleteCount = Number(result.failedCount || 0);
       removeFromFileList(selectedItemIndex.value);
@@ -9230,6 +9300,7 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
     }
 
     await refreshGroupedRowsAfterDelete(deletedFileIds);
+    await refreshFolderSidebarCounts([...affectedFolderPaths]);
     await refreshAffectedAlbums(Array.from(affectedAlbumIds));
     await refreshLibraryTotalCount();
 

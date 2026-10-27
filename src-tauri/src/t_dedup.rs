@@ -41,6 +41,7 @@ impl Default for DedupScanStatus {
 #[serde(rename_all = "camelCase")]
 pub struct DedupDeleteResult {
     pub deleted_file_ids: Vec<i64>,
+    pub affected_folder_paths: Vec<String>,
     pub deleted_count: usize,
     pub failed_count: usize,
     pub errors: Vec<String>,
@@ -918,7 +919,22 @@ pub fn delete(request: DedupDeleteRequest) -> Result<DedupDeleteResult, String> 
     tx.commit().map_err(|e| e.to_string())?;
 
     let candidate_ids: HashSet<i64> = files_to_delete.iter().map(|file| file.file_id).collect();
+    let source_folders: Vec<(i64, String)> = files_to_delete
+        .iter()
+        .filter_map(|file| {
+            file.file_path
+                .rsplit_once('/')
+                .map(|(folder, _)| (file.file_id, folder.to_string()))
+        })
+        .collect();
     let delete_result = crate::t_cmds::delete_files_grouped(files_to_delete, request.permanently)?;
+    let deleted_ids: HashSet<i64> = delete_result.deleted_file_ids.iter().copied().collect();
+    let affected_folder_paths = source_folders
+        .into_iter()
+        .filter_map(|(id, path)| deleted_ids.contains(&id).then_some(path))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     let deleted_count = delete_result
         .deleted_file_ids
         .iter()
@@ -950,6 +966,7 @@ pub fn delete(request: DedupDeleteRequest) -> Result<DedupDeleteResult, String> 
 
     Ok(DedupDeleteResult {
         deleted_file_ids,
+        affected_folder_paths,
         deleted_count,
         failed_count: delete_result.failed_count + failures.len(),
         errors: failures,
