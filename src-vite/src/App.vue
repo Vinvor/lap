@@ -181,6 +181,7 @@ const handleKeyDown = (event) => {
   emit('global-keydown', {
     key: event.key,
     code: event.code,
+    repeat: event.repeat,
     altKey: event.altKey,
     ctrlKey: event.ctrlKey,
     metaKey: event.metaKey,

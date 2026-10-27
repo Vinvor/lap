@@ -4640,6 +4640,13 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     return;
   }
 
+  if (showQuickView.value && (event.key === ' ' || event.key === 'Space') && matchesShortcut('view.quickPreview', event, shortcutPlatform)) {
+    event.preventDefault();
+    // macOS dispatches this shortcut through the capture/global channel.
+    if (!isMac && !event.repeat) closeQuickPreview();
+    return;
+  }
+
   if (matchesShortcut('view.close', event, shortcutPlatform)) {
     // Close Quick Preview in one step, even in fullscreen. Unmount restores
     // the native window while preserving the saved fullscreen preference.
@@ -4751,6 +4758,18 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     return;
   }
 
+
+  if (getActivePreviewMode() !== 'none' && matchesShortcut('view.zoomFit', event, shortcutPlatform)) {
+    event.preventDefault();
+    if (!event.repeat) {
+      if (getActivePreviewMode() === 'quick-view') {
+        quickViewZoomFit.value = !quickViewZoomFit.value;
+      } else {
+        filmStripZoomFit.value = !filmStripZoomFit.value;
+      }
+    }
+    return;
+  }
 
   if (getActivePreviewMode() !== 'none' && matchesShortcut('view.zoomIn', event, shortcutPlatform) && event.key === '=') {
     event.preventDefault();
@@ -4888,10 +4907,11 @@ function handleLocalKeyDown(event: KeyboardEvent) {
   }
 }
 
-function handleQuickPreviewShortcut(event: { key: string; code?: string }): boolean {
+function handleQuickPreviewShortcut(event: { key: string; code?: string; repeat?: boolean }): boolean {
   if (!matchesShortcut('view.quickPreview', event, shortcutPlatform)) {
     return false;
   }
+  if (event.repeat) return true;
 
   if (event.key === 'Enter') {
     if (!showQuickView.value && !isFilmstripView.value) {
@@ -4906,13 +4926,7 @@ function handleQuickPreviewShortcut(event: { key: string; code?: string }): bool
   }
 
   if (getActivePreviewMode() === 'quick-view') {
-    if (fileList.value[selectedItemIndex.value]?.file_type === 2) {
-      getActivePreviewMediaRef()?.togglePlay?.();
-    } else {
-      quickViewZoomFit.value = !quickViewZoomFit.value;
-    }
-  } else if (getActivePreviewMode() === 'filmstrip') {
-    filmStripZoomFit.value = !filmStripZoomFit.value;
+    closeQuickPreview();
   } else if (!isFilmstripView.value) {
     showQuickView.value = true;
     quickViewZoomFit.value = true;
@@ -4996,7 +5010,8 @@ const handleKeyDown = (e: any) => {
   }
 
   // Disable global shortcuts during slideshow except close for safety.
-  if (isSlideShow.value && !matchesShortcut('view.close', event, shortcutPlatform)) {
+  if (isSlideShow.value && !matchesShortcut('view.close', event, shortcutPlatform) &&
+    !(showQuickView.value && (key === ' ' || key === 'Space') && matchesShortcut('view.quickPreview', event, shortcutPlatform))) {
     return;
   }
 

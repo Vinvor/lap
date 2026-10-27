@@ -432,10 +432,7 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: 'view.zoomFit',
     contexts: ['content', 'media-viewer', 'image-viewer'],
-    defaultBindings: [
-      { key: ' ', label: 'Space' },
-      { key: 'Space', label: 'Space' },
-    ],
+    defaultBindings: [{ code: 'KeyZ', label: 'Z' }],
   },
   {
     id: 'view.cycleBackground',
