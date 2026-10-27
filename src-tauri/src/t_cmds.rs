@@ -2991,15 +2991,22 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
             && m.len() as i64 == old.size
             && t_utils::systemtime_to_timestamp(m.modified().ok()) == old.modified_at
     }) {
-        if crate::t_xmp::is_xmp_import_enabled() {
-            crate::t_xmp::import_xmp_for_file_with_mode(file_id, path, crate::t_xmp::XmpImportMode::RefreshNonDestructive)?;
-        }
+        let checked_at = chrono::Utc::now().timestamp_millis();
+        let import_error = if crate::t_xmp::is_xmp_import_enabled() {
+            crate::t_xmp::import_xmp_for_file_with_mode(file_id, path, crate::t_xmp::XmpImportMode::RefreshNonDestructive)
+                .err().map(|error| format!("XMP import failed: {error}"))
+        } else { None };
+        // Keep the original's pending state. Report sidecar errors, but advance
+        // the check time so an unchanged broken sidecar is not offered forever.
+        AFile::update_column(file_id, "last_scan_time", &checked_at)?;
         let file = AFile::get_file_info(file_id)?.unwrap_or(old);
-        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, ..Default::default() }));
+        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, error: import_error, ..Default::default() }));
     }
-    let updated = AFile::update_file_info(file_id, path, chrono::Utc::now().timestamp_millis())?;
+    let (updated, import_error) = AFile::update_file_info_with_xmp_error(
+        file_id, path, chrono::Utc::now().timestamp_millis(),
+    )?;
     if let Some(ref file) = updated {
-        let content_changed = old.metadata_pending || old.modified_at != file.modified_at || old.size != file.size;
+        let content_changed = old.cloud_only || old.modified_at != file.modified_at || old.size != file.size;
         if content_changed || old.width != file.width || old.height != file.height
             || old.e_orientation != file.e_orientation {
             AThumb::delete(file_id)?;
@@ -3009,11 +3016,12 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
         }
     }
     AFile::update_column(file_id, "cloud_only", &false)?;
-    AFile::update_column(file_id, "metadata_pending", &false)?;
+    if import_error.is_none() { AFile::update_column(file_id, "metadata_pending", &false)?; }
     Ok(AFile::get_file_info(file_id)?.map(|file| FileRefreshResult {
         size_delta: file.size - old.size,
         file,
         skipped: false,
+        error: import_error,
         ..Default::default()
     }))
 }
@@ -3030,16 +3038,38 @@ pub fn end_file_refresh_batch(batch_id: u64) {
     crate::t_xmp::end_refresh_batch(batch_id);
 }
 
+#[tauri::command]
+pub async fn check_selected_file_info(library_id: String, file_id: i64, batch_id: u64) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
+        if t_config::current_library_id()? != library_id { return Err("Library changed".into()); }
+        let _index = crate::t_xmp::refresh_index_scope(Some(batch_id), &library_id)?;
+        AFile::needs_file_info_refresh(file_id)
+    }).await.map_err(|e| format!("File check task failed: {e}"))?
+}
+
 /// Force a selected file refresh without accepting a stale frontend file path.
 #[tauri::command]
-pub async fn refresh_selected_file_info(library_id: String, file_id: i64, batch_id: Option<u64>) -> Result<Option<FileRefreshResult>, String> {
+pub async fn refresh_selected_file_info(library_id: String, file_id: i64, batch_id: Option<u64>, rebuild_previews: Option<bool>) -> Result<Option<FileRefreshResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
         if t_config::current_library_id()? != library_id {
             return Err("Library changed".to_string());
         }
         let _index = crate::t_xmp::refresh_index_scope(batch_id, &library_id)?;
-        refresh_file(file_id, false)
+        let mut result = refresh_file(file_id, false)?;
+        if rebuild_previews.unwrap_or(false)
+            && let Some(ref mut result) = result
+            && !result.skipped {
+            match AThumb::delete(file_id) {
+                Ok(_) => result.file.has_thumbnail = Some(false),
+                Err(error) => result.error = Some(match result.error.take() {
+                    Some(previous) => format!("{previous}; Preview rebuild failed: {error}"),
+                    None => format!("Preview rebuild failed: {error}"),
+                }),
+            }
+        }
+        Ok(result)
     }).await.map_err(|e| format!("File refresh task failed: {e}"))?
 }
 
@@ -3063,7 +3093,7 @@ pub async fn index_cloud_file(
         let path = AFile::get_file_info(file_id)?.and_then(|file| file.file_path).ok_or("File not found")?;
         let was_cloud_only = t_utils::is_cloud_only_path(&path);
         let Some(mut result) = refresh_file(file_id, true)? else { return Ok(None) };
-        if !was_cloud_only {
+        if !was_cloud_only || result.error.is_some() {
             return Ok(Some(result));
         }
         // Keep the refreshed file even if thumbnail generation or release fails.

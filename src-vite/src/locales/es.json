@@ -1011,6 +1011,13 @@
       "error": "Fallo al seleccionar archivo."
     },
     "file_refresh": {
+      "rebuild_previews": "Regenerar las vistas previas de todos los archivos seleccionados",
+      "skipped": "Omitidos: {count}",
+      "checking": "Comprobando…",
+      "pending": "{count} archivos necesitan actualizarse",
+      "up_to_date": "La información de los archivos está actualizada.",
+      "check_failed": "No se pudieron comprobar algunos archivos.",
+      "update": "Actualizar",
       "status": "Estado de actualización",
       "running": "Actualizando…",
       "cancelling": "Cancelando…",

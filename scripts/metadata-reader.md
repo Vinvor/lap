@@ -155,7 +155,11 @@ expiring tombstones handle cancellation arriving before registration.
 
 `afiles.icc_profile`, `color_space` and nullable integer `bit_depth` are populated
 by the existing scan/file-refresh extraction. Migration v20 adds empty
-columns to older catalogs without reading or backfilling historical media. File
+columns and marks historical images/RAW as `metadata_pending`, without reading
+media during migration. Scan or explicit refresh extracts those fields once and
+clears the marker on successful catalog update, even when values remain empty.
+Online-only files keep their marker until available locally. Metadata-only
+backfill preserves thumbnails and embeddings. File
 Info renders only nonempty catalog values, including the selected RAW companion's
 values. Opening or expanding File never requests these properties; the former
 image-detail request group and its separate insertion animation are removed.

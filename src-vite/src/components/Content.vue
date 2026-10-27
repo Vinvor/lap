@@ -9345,6 +9345,7 @@ const refreshFileInfoFromPanel = async (file: any) => {
   if (libraryId !== libConfig._libraryId || Number(file.id) !== fileId) return;
   if (!result?.file) throw new Error('File info refresh failed');
   Object.assign(file, result.file);
+  if (result.error) toast.warning(result.error);
   fileInfoRevision.value++;
   void tauriEmit('tags-changed');
 };
@@ -9360,7 +9361,8 @@ const updateFile = async (file: any, isRefresh = false) => {
       if (refreshed.file) Object.assign(file, refreshed.file);
       fileInfoRevision.value++;
       void tauriEmit('tags-changed');
-      toast.success(localeMsg.value.tooltip.update_image.success);
+      if (refreshed?.error) toast.warning(refreshed.error);
+      else toast.success(localeMsg.value.tooltip.update_image.success);
       return;
     }
     const updatedFile = isRefresh ? refreshed?.file : await updateFileInfo(file.id, file.file_path);
@@ -9381,7 +9383,8 @@ const updateFile = async (file: any, isRefresh = false) => {
       uiStore.clearActiveAdjustments();
 
       if (isRefresh) {
-        toast.success(localeMsg.value.tooltip.update_image.success);
+        if (refreshed?.error) toast.warning(refreshed.error);
+        else toast.success(localeMsg.value.tooltip.update_image.success);
       }
     } else if (isRefresh) {
       toast.error(localeMsg.value.tooltip.update_image.failed);

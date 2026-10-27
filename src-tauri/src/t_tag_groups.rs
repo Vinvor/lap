@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn version_17_creates_groups_with_persistent_ordering() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE albums(id INTEGER PRIMARY KEY); CREATE TABLE afiles(id INTEGER PRIMARY KEY); CREATE TABLE atags(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE); PRAGMA user_version = 16;").unwrap();
+        conn.execute_batch("CREATE TABLE albums(id INTEGER PRIMARY KEY); CREATE TABLE afiles(id INTEGER PRIMARY KEY, file_type INTEGER); CREATE TABLE atags(id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE); PRAGMA user_version = 16;").unwrap();
         crate::t_migration::check_and_migrate(&conn).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))

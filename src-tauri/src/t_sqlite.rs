@@ -1581,7 +1581,7 @@ pub struct AFile {
     #[serde(default)]
     pub cloud_only: bool, // online-only placeholder when last scanned
     #[serde(default)]
-    pub metadata_pending: bool, // indexed without reading the content
+    pub metadata_pending: bool, // content extraction or schema backfill is pending
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2209,7 +2209,7 @@ pub struct LibraryVisibleCounts {
 pub(crate) enum CloudScanAction {
     /// Local file: the regular scan, which reads the content.
     Read,
-    /// Local file indexed while online-only: read it in full even if unchanged.
+    /// Local file awaiting metadata extraction: read it even if unchanged.
     ReadPending,
     /// Unknown online-only file: record what the directory entry tells us.
     InsertStub,
@@ -2903,7 +2903,9 @@ impl AFile {
                 .collect::<Vec<_>>(),
             _ => return None,
         };
-        Some(values)
+        // Unknown GPS values may be encoded as 0/0. SQLite stores NaN as NULL,
+        // so normalize before comparing or persisting metadata.
+        values.iter().all(|value| value.is_finite()).then_some(values)
     }
 
     /// Converts DMS (degrees, minutes, seconds) to decimal degrees.
@@ -3143,7 +3145,7 @@ impl AFile {
                 e_make = ?14, e_model = ?15, e_date_time = ?16, e_software = ?17, e_artist = ?18, e_copyright = ?19, e_description = ?20, e_lens_make = ?21, e_lens_model = ?22, e_exposure_bias = ?23, e_exposure_time = ?24, e_f_number = ?25, e_focal_length = ?26, e_iso_speed = ?27, e_flash = ?28, e_orientation = ?29,
                 gps_latitude = ?30, gps_longitude = ?31, gps_altitude = ?32, geo_name = ?33, geo_admin1 = ?34, geo_admin2 = ?35, geo_cc = ?36,
                 last_scan_time = ?37, content_identifier = ?38, media_subtype = ?39, motion_photo_offset = ?40,
-                icc_profile = ?41, color_space = ?42, bit_depth = ?43
+                icc_profile = ?41, color_space = ?42, bit_depth = ?43, metadata_pending = 0
             WHERE id = ?44",
             params![
                 file.name,
@@ -3870,16 +3872,23 @@ impl AFile {
                 let file_id = existing_id.ok_or("Existing DB record is missing file id")?;
                 let mut file = Self::update_file_info(file_id, file_path, last_scan_time)?
                     .ok_or("File not found")?;
-                // Whatever was cached while the file was online-only may be stale.
-                let _ = AThumb::delete(file_id);
+                // A schema backfill alone does not invalidate thumbnails or embeddings.
+                let content_changed = existing_file.as_ref().is_some_and(|old| old.cloud_only
+                    || old.size != metadata.len() as i64
+                    || old.modified_at != t_utils::systemtime_to_timestamp(metadata.modified().ok()));
+                let thumbnail_changed = content_changed || existing_file.as_ref().is_some_and(|old|
+                    old.width != file.width || old.height != file.height || old.e_orientation != file.e_orientation);
+                if thumbnail_changed {
+                    let _ = AThumb::delete(file_id);
+                    file.has_thumbnail = Some(false);
+                }
+                if content_changed { file.has_embedding = Some(false); }
                 open_conn()?.execute(
-                    "UPDATE afiles SET embeds = NULL, cloud_only = 0, metadata_pending = 0 WHERE id = ?1",
-                    params![file_id],
+                    "UPDATE afiles SET embeds = CASE WHEN ?2 THEN NULL ELSE embeds END,
+                     cloud_only = 0, metadata_pending = ?3 WHERE id = ?1",
+                    params![file_id, content_changed, file.metadata_pending],
                 ).map_err(|e| e.to_string())?;
-                file.has_thumbnail = Some(false);
-                file.has_embedding = Some(false);
                 file.cloud_only = false;
-                file.metadata_pending = false;
                 return Ok((file, 2));
             }
             CloudScanAction::InsertStub => {
@@ -4005,19 +4014,8 @@ impl AFile {
                             }
                         }
                     }
-                    if crate::t_xmp::is_xmp_import_enabled() {
-                        if let Ok(conn) = open_conn() {
-                            if let Ok(true) = crate::t_xmp::import_xmp_for_file_with_conn(
-                                file_id,
-                                file_path,
-                                &conn,
-                                crate::t_xmp::XmpImportMode::RescanNonDestructive,
-                            ) {
-                                if let Ok(Some(refreshed)) = Self::get_file_info(file_id) {
-                                    file = refreshed;
-                                }
-                            }
-                        }
+                    if Self::import_scanned_xmp(file_id, file_path, crate::t_xmp::XmpImportMode::RescanNonDestructive)? {
+                        if let Some(refreshed) = Self::get_file_info(file_id)? { file = refreshed; }
                     }
                 }
             }
@@ -4040,18 +4038,9 @@ impl AFile {
         let new_file = Self::fetch(folder_id, file_path)?;
         if let Some(ref file) = new_file {
             if let Some(file_id) = file.id {
-                if crate::t_xmp::is_xmp_import_enabled() {
-                    if let Ok(conn) = open_conn() {
-                        if let Ok(true) = crate::t_xmp::import_xmp_for_file_with_conn(
-                            file_id,
-                            file_path,
-                            &conn,
-                            crate::t_xmp::XmpImportMode::InitialScan,
-                        ) {
-                            if let Ok(Some(refreshed)) = Self::fetch(folder_id, file_path) {
-                                return Ok((refreshed, 1));
-                            }
-                        }
+                if Self::import_scanned_xmp(file_id, file_path, crate::t_xmp::XmpImportMode::InitialScan)? {
+                    if let Some(refreshed) = Self::fetch(folder_id, file_path)? {
+                        return Ok((refreshed, 1));
                     }
                 }
             }
@@ -4107,12 +4096,61 @@ impl AFile {
         Ok(files)
     }
 
-    /// update a file info
+    fn import_scanned_xmp(file_id: i64, file_path: &str, mode: crate::t_xmp::XmpImportMode) -> Result<bool, String> {
+        if !crate::t_xmp::is_xmp_import_enabled() { return Ok(false); }
+        let conn = open_conn()?;
+        match crate::t_xmp::import_xmp_for_file_with_conn(file_id, file_path, &conn, mode) {
+            Ok(changed) => Ok(changed),
+            Err(error) => {
+                conn.execute("UPDATE afiles SET metadata_pending=1 WHERE id=?1", params![file_id])
+                    .map_err(|e| e.to_string())?;
+                eprintln!("XMP import failed for {file_path}: {error}");
+                // The file is valid and must continue through scanning/import.
+                // Return the updated row so callers also see its retry marker.
+                Ok(true)
+            }
+        }
+    }
+
+    /// Check file timestamps and size without reading metadata or downloading originals.
+    pub fn needs_file_info_refresh(file_id: i64) -> Result<bool, String> {
+        let old = Self::get_file_info(file_id)?.ok_or("File not found")?;
+        let path = old.file_path.as_deref().ok_or("File path missing")?;
+        let info = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        let modified = chrono::DateTime::<chrono::Utc>::from(
+            info.modified().map_err(|e| e.to_string())?,
+        ).timestamp_millis();
+        let scanned = old.last_scan_time.unwrap_or(0);
+        if (!t_utils::is_cloud_only(&info) && old.metadata_pending)
+            || scanned <= 0 || modified > scanned || old.size != info.len() as i64 {
+            return Ok(true);
+        }
+        if crate::t_xmp::is_xmp_import_enabled()
+            && let Some(sidecar) = crate::t_xmp::find_xmp_sidecar(Path::new(path)) {
+            let modified = std::fs::metadata(sidecar)
+                .and_then(|info| info.modified()).map_err(|e| e.to_string())?;
+            return Ok(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis() > scanned);
+        }
+        Ok(false)
+    }
+
+    /// Update file info while preserving catalog edits and pairing.
     pub fn update_file_info(
         file_id: i64,
         file_path: &str,
         last_scan_time: i64,
     ) -> Result<Option<Self>, String> {
+        let (file, error) = Self::update_file_info_with_xmp_error(file_id, file_path, last_scan_time)?;
+        if let Some(error) = error { eprintln!("File metadata updated with warning: {error}"); }
+        Ok(file)
+    }
+
+    /// Return successful file metadata even if the subsequent XMP import fails.
+    pub fn update_file_info_with_xmp_error(
+        file_id: i64,
+        file_path: &str,
+        last_scan_time: i64,
+    ) -> Result<(Option<Self>, Option<String>), String> {
         let _xmp_scan = crate::t_xmp::sidecar_scan(last_scan_time);
         // get old file info
         let old_file_info =
@@ -4155,15 +4193,31 @@ impl AFile {
         // update the file info
         Self::update(file_id, &new_file_info)?;
 
+        let mut import_error = None;
         if crate::t_xmp::is_xmp_import_enabled() {
-            let _ = crate::t_xmp::import_xmp_for_file_with_mode(
+            if let Err(error) = crate::t_xmp::import_xmp_for_file_with_mode(
                 file_id,
                 file_path,
                 crate::t_xmp::XmpImportMode::RefreshNonDestructive,
-            );
+            ) {
+                // Keep successful metadata, but make the failed import retryable.
+                Self::update_column(file_id, "metadata_pending", &true)?;
+                let content_changed = old_file_info.cloud_only
+                    || old_file_info.size != new_file_info.size
+                    || old_file_info.modified_at != new_file_info.modified_at;
+                if content_changed || old_file_info.width != new_file_info.width
+                    || old_file_info.height != new_file_info.height
+                    || old_file_info.e_orientation != new_file_info.e_orientation {
+                    AThumb::delete(file_id)?;
+                }
+                if content_changed {
+                    Self::update_column(file_id, "embeds", &Option::<Vec<u8>>::None)?;
+                }
+                import_error = Some(format!("XMP import failed: {error}"));
+            }
         }
 
-        Self::get_file_info(file_id)
+        Ok((Self::get_file_info(file_id)?, import_error))
     }
 
     /// Backfill Motion Photo metadata without re-extracting all file metadata.

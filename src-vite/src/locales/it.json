@@ -1011,6 +1011,13 @@
       "error": "Impossibile selezionare il file."
     },
     "file_refresh": {
+      "rebuild_previews": "Rigenera le anteprime di tutti i file selezionati",
+      "skipped": "Ignorati: {count}",
+      "checking": "Verifica…",
+      "pending": "{count} file da aggiornare",
+      "up_to_date": "Le informazioni dei file sono aggiornate.",
+      "check_failed": "Impossibile verificare alcuni file.",
+      "update": "Aggiorna",
       "status": "Stato aggiornamento",
       "running": "Aggiornamento…",
       "cancelling": "Annullamento…",

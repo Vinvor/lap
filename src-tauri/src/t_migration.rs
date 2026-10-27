@@ -515,7 +515,10 @@ pub fn check_and_migrate(conn: &Connection) -> Result<(), String> {
                             .map_err(|e| format!("Migration {} failed adding {column}: {e}", migration.version))?;
                     }
                 }
-                // Schema and version advance together; old rows remain NULL.
+                // Schedule one content read; empty color fields are valid after extraction.
+                tx.execute("UPDATE afiles SET metadata_pending=1 WHERE file_type IN (1,3)", [])
+                    .map_err(|e| format!("Migration 20 failed marking metadata pending: {e}"))?;
+                // Schema, pending markers and version advance together.
                 tx.pragma_update(None, "user_version", migration.version).map_err(|e| e.to_string())?;
                 tx.commit().map_err(|e| e.to_string())?;
             } else if !migration.sql.trim().is_empty() {
@@ -580,9 +583,24 @@ mod album_filter_migration_tests {
     use super::*;
 
     #[test]
+    fn image_properties_schedule_one_backfill_without_clearing_other_pending_work() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY, file_type INTEGER, metadata_pending INTEGER NOT NULL DEFAULT 0);
+            INSERT INTO afiles VALUES(1,1,0),(2,3,0),(3,2,0),(4,2,1);
+            PRAGMA user_version=19;").unwrap();
+        check_and_migrate(&conn).unwrap();
+        let pending: Vec<i64> = conn.prepare("SELECT metadata_pending FROM afiles ORDER BY id").unwrap()
+            .query_map([], |row| row.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(pending, vec![1, 1, 0, 1]);
+        conn.execute("UPDATE afiles SET metadata_pending=0", []).unwrap();
+        check_and_migrate(&conn).unwrap();
+        assert_eq!(conn.query_row("SELECT SUM(metadata_pending) FROM afiles", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
     fn album_filter_migration_is_restartable_and_defaults_to_off() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE albums(id INTEGER PRIMARY KEY); CREATE TABLE afiles(id INTEGER PRIMARY KEY); INSERT INTO albums VALUES(1); PRAGMA user_version=17;").unwrap();
+        conn.execute_batch("CREATE TABLE albums(id INTEGER PRIMARY KEY); CREATE TABLE afiles(id INTEGER PRIMARY KEY, file_type INTEGER); INSERT INTO albums VALUES(1); PRAGMA user_version=17;").unwrap();
         check_and_migrate(&conn).unwrap();
         let settings: (i64, Option<i64>, String) = conn.query_row(
             "SELECT file_types,small_image_filter,excluded_folders FROM albums", [],
@@ -597,7 +615,7 @@ mod album_filter_migration_tests {
     #[test]
     fn cloud_state_migration_is_restartable_and_defaults_to_local() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY); INSERT INTO afiles VALUES(1); PRAGMA user_version=18;").unwrap();
+        conn.execute_batch("CREATE TABLE afiles(id INTEGER PRIMARY KEY, file_type INTEGER); INSERT INTO afiles(id) VALUES(1); PRAGMA user_version=18;").unwrap();
         check_and_migrate(&conn).unwrap();
         let state: (i64, i64) = conn.query_row("SELECT cloud_only, metadata_pending FROM afiles", [],
             |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
