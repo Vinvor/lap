@@ -1421,6 +1421,7 @@ where
 {
     let started = Instant::now();
     let mut aae_cache = t_apple_sidecar::ImportAaeCache::default();
+    let mut xmp_cache = crate::t_xmp_files::Cache::default();
     let album = Album::get_album_by_id(album_id)?;
     let source = fs::canonicalize(source_path)
         .map_err(|e| format!("Cannot access source folder: {}", e))?;
@@ -1576,6 +1577,11 @@ where
                             let right = aae_cache.paths(candidate);
                             left.len() == right.len() && left.iter().zip(&right)
                                 .all(|(a, b)| import_files_equal(a, b, &is_cancelled).unwrap_or(false))
+                        } && {
+                            let left = xmp_cache.import_sidecars(&path)?;
+                            let right = xmp_cache.import_sidecars(candidate)?;
+                            left.len() == right.len() && left.iter().zip(&right)
+                                .all(|(a, b)| import_files_equal(a, b, &is_cancelled).unwrap_or(false))
                         };
                     compare_time += compare_started.elapsed();
                     if duplicate {
@@ -1593,8 +1599,18 @@ where
             }
             if is_cancelled() { return Err("Import cancelled".to_string()); }
             let copy_started = Instant::now();
+            xmp_cache.ensure_directory(&target_folder)?;
             let destination = import_file(&path_string, &target_folder.to_string_lossy())
                 .ok_or_else(|| format!("Failed to copy file: {}", path_string))?;
+            // The media copy changed the directory; acknowledge this known entry
+            // before checking for outside changes in the cached sidecar index.
+            xmp_cache.record(Path::new(&destination), &[]);
+            let xmp = match crate::t_xmp_files::Guard::with_cache(
+                [(path.as_path(), Path::new(&destination))], crate::t_xmp_files::Operation::Copy, &mut xmp_cache,
+            ) {
+                Ok(guard) => guard,
+                Err(error) => { let _ = fs::remove_file(&destination); return Err(error); }
+            };
             let copied_sidecars = match t_apple_sidecar::copy_apple_aae_paths_for_import(
                 &path_string,
                 &destination,
@@ -1616,6 +1632,8 @@ where
                 return Err(error);
             }
             database_time += database_started.elapsed();
+            xmp_cache.record(Path::new(&destination), &xmp.paths());
+            xmp.commit();
             aae_cache.record(&copied_sidecars);
             candidates.get_mut(&target_folder).unwrap().entry(size).or_default()
                 .push(PathBuf::from(&destination));
@@ -1633,7 +1651,8 @@ where
                 if duplicate { skipped += 1; } else { imported += 1; }
                 completed_paths.insert(path_string);
             }
-            Err(_) => {
+            Err(error) => {
+                eprintln!("Failed to import '{}': {}", path_string, error);
                 failed += 1;
             }
         };

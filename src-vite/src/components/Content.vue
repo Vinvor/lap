@@ -779,7 +779,7 @@ import { useToast } from '@/common/toast';
 import { useUIStore } from '@/stores/uiStore';
 import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTimeLine, getQueryFiles, getFilesByIds, getGroupedQueryRows, getGroupedFilePosition, getGroupFileIds, getQueryFileIds, syncAlbumFolderMtimes,
          getSmartQueryCountAndSum, getSmartQueryTimeLine, getSmartQueryFiles, getSmartGroupedQueryRows, getSmartGroupFileIds, getSmartQueryFileIds, getSmartQueryFilePosition,
-         copyImages, renameFile, moveFile, moveFileOutsideLibrary, copyFile, deleteFile, deleteFilePermanently, batchDeleteFiles, editFileComment, getFileThumb, getFileThumbs, getFileInfo,
+         copyImages, renameFile, moveFile, moveFileOutsideLibrary, copyFile, withFileTransferBatch, deleteFile, deleteFilePermanently, batchDeleteFiles, editFileComment, getFileThumb, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, getTagGroupName, searchSimilarImages, generateEmbedding,
          revealPath, getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
          updateFileInfo, refreshFileInfo, getSupportedFormatExtensions, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
@@ -3294,39 +3294,41 @@ async function clearContentInternalDrag(event?: PointerEvent) {
       let transferFailureCount = 0;
       let applyAllPolicy: FileConflictPolicy | null = null;
       const affectedAlbumIds = new Set<number>([albumId]);
-      for (const file of files) {
-        if (!copy && file.folder_id === selected.id) continue;
-        const conflict = await resolveConflictPolicy(
-          file.file_path,
-          getFolderName(file.file_path),
-          destPath,
-          applyAllPolicy,
-          files.length > 1,
-          !copy,
-        );
-        if (conflict.applyAll) applyAllPolicy = conflict.policy;
-        if (conflict.policy === 'skip') continue;
-        if (copy) {
-          const copiedPath = await copyFile(file.file_path, destPath, conflict.policy);
-          if (copiedPath) {
-            if (await addFileToDb(selected.id, copiedPath)) {
-              done++;
+      await withFileTransferBatch(async (batchId: number) => {
+        for (const file of files) {
+          if (!copy && file.folder_id === selected.id) continue;
+          const conflict = await resolveConflictPolicy(
+            file.file_path,
+            getFolderName(file.file_path),
+            destPath,
+            applyAllPolicy,
+            files.length > 1,
+            !copy,
+          );
+          if (conflict.applyAll) applyAllPolicy = conflict.policy;
+          if (conflict.policy === 'skip') continue;
+          if (copy) {
+            const copiedPath = await copyFile(file.file_path, destPath, conflict.policy, batchId);
+            if (copiedPath) {
+              if (await addFileToDb(selected.id, copiedPath)) {
+                done++;
+              } else {
+                indexFailureCount++;
+              }
             } else {
-              indexFailureCount++;
+              transferFailureCount++;
             }
           } else {
-            transferFailureCount++;
-          }
-        } else {
-          const movedPath = await moveFile(file.id, file.file_path, selected.id, destPath, conflict.policy);
-          if (movedPath) {
-            done++;
-            affectedAlbumIds.add(Number(file.album_id || 0));
-          } else {
-            transferFailureCount++;
+            const movedPath = await moveFile(file.id, file.file_path, selected.id, destPath, conflict.policy, batchId);
+            if (movedPath) {
+              done++;
+              affectedAlbumIds.add(Number(file.album_id || 0));
+            } else {
+              transferFailureCount++;
+            }
           }
         }
-      }
+      });
       if (done > 0) {
         await refreshAffectedAlbums(Array.from(affectedAlbumIds));
         await refreshLibraryTotalCount();
@@ -8563,7 +8565,13 @@ const onRenameFile = async (newName: string) => {
       showRenameMsgbox.value = false;
       return;
     }
-    const newFilePath = await renameFile(file.id, file.file_path, fileName );
+    let newFilePath;
+    try {
+      newFilePath = await renameFile(file.id, file.file_path, fileName);
+    } catch (error) {
+      errorMessage.value = `${localeMsg.value.msgbox.rename_file.error}: ${String(error)}`;
+      return;
+    }
     if(newFilePath) {
       console.log('onRenameFile:', newFilePath);
       file.name = fileName;
@@ -8652,14 +8660,14 @@ const onMoveTo = async () => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const moves = await runWithKeyedConcurrency(
+    const moves = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
       items,
       item => getTransferDestinationKey(item),
       async item => {
-        const movedFile = await moveFile(item.id, item.file_path, destFolderId, destPath);
+        const movedFile = await moveFile(item.id, item.file_path, destFolderId, destPath, 'keep_both', batchId);
         return { item, movedFile };
       },
-    );
+    ));
     const successfulMoves = moves.flatMap(result =>
       result.status === 'fulfilled' && result.value.movedFile ? [result.value] : [],
     );
@@ -8835,17 +8843,17 @@ const onMoveToFolder = async () => {
     if (conflict.policy === 'skip') continue;
     operations.push({ file, policy: conflict.policy });
   }
-  const moveResults = await runWithKeyedConcurrency(
+  const moveResults = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
     operations,
     ({ file }) => getTransferDestinationKey(file),
     async ({ file, policy }) => {
       const movedFile = libraryDestination
-        ? await moveFile(file.id, file.file_path, libraryDestination.folderId, destPath, policy)
-        : await moveFileOutsideLibrary(file.id, file.file_path, destPath, policy);
+        ? await moveFile(file.id, file.file_path, libraryDestination.folderId, destPath, policy, batchId)
+        : await moveFileOutsideLibrary(file.id, file.file_path, destPath, policy, batchId);
       if (!movedFile) throw new Error(`Failed to move ${file.file_path}`);
       return { file, movedFile };
     },
-  );
+  ));
   const successfulMoves = moveResults.flatMap(result =>
     result.status === 'fulfilled' ? [result.value] : [],
   );
@@ -8917,11 +8925,11 @@ const onCopyToFolder = async () => {
     if (conflict.policy === 'skip') continue;
     operations.push({ file, policy: conflict.policy });
   }
-  const copyResults = await runWithKeyedConcurrency(
+  const copyResults = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
     operations,
     ({ file }) => getTransferDestinationKey(file),
     async ({ file, policy }) => {
-      const copiedFile = await copyFile(file.file_path, destPath, policy);
+      const copiedFile = await copyFile(file.file_path, destPath, policy, batchId);
       if (!copiedFile) throw new Error(`Failed to copy ${file.file_path}`);
       if (libraryDestination) {
         const indexedFile = await addFileToDb(libraryDestination.folderId, copiedFile);
@@ -8931,7 +8939,7 @@ const onCopyToFolder = async () => {
       }
       return { file, copiedFile };
     },
-  );
+  ));
   const successCount = copyResults.filter(result => result.status === 'fulfilled').length;
   const indexFailureCount = copyResults.filter(
     result => result.status === 'rejected' && result.reason instanceof CopyIndexError,

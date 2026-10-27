@@ -1215,7 +1215,14 @@ const finishRename = async () => {
   }
 
   // Call API
-  const newPath = await renameFile(props.fileInfo.id, props.fileInfo.file_path, fullNewName);
+  let newPath;
+  try {
+    newPath = await renameFile(props.fileInfo.id, props.fileInfo.file_path, fullNewName);
+  } catch (error) {
+    toast.error(`${t('msgbox.rename_file.error')}: ${String(error)}`);
+    cancelRename();
+    return;
+  }
   
   if (newPath) {
     // Update local props to reflect change immediately (assuming parent passes object ref)

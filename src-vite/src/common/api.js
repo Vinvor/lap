@@ -1160,22 +1160,35 @@ export function batchRenameFiles(libraryId, fileIds, options, expected) {
 }
 
 // Rename a single file.
-export async function renameFile(fileId, filePath, newName) {
+export function renameFile(fileId, filePath, newName) {
+  return invoke('rename_file', { fileId, filePath, newName });
+}
+
+// One explicit action owns the backend directory index, including early failures.
+export async function withFileTransferBatch(action) {
+  let batchId = null;
   try {
-    const result = await invoke('rename_file', { fileId, filePath, newName });
-    if (result) {
-      return result;
-    }
+    batchId = await invoke('begin_file_transfer_batch');
   } catch (error) {
-    console.log('Failed to rename file:', error);
+    console.error('Failed to begin file transfer batch:', error);
   }
-  return null;
+  try {
+    return await action(batchId);
+  } finally {
+    if (batchId !== null) {
+      try {
+        await invoke('end_file_transfer_batch', { batchId });
+      } catch (error) {
+        console.error('Failed to end file transfer batch:', error);
+      }
+    }
+  }
 }
 
 // move a file
-export async function moveFile(fileId, filePath, newFolderId, newFolderPath, conflictPolicy = 'keep_both') {
+export async function moveFile(fileId, filePath, newFolderId, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    const result = await invoke('move_file', { fileId, filePath, newFolderId, newFolderPath, conflictPolicy });
+    const result = await invoke('move_file', { fileId, filePath, newFolderId, newFolderPath, conflictPolicy, batchId });
     if(result) {
       return result;
     };
@@ -1185,9 +1198,9 @@ export async function moveFile(fileId, filePath, newFolderId, newFolderPath, con
   return null;
 }
 
-export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, conflictPolicy = 'keep_both') {
+export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy });
+    return await invoke('move_file_outside_library', { fileId, filePath, newFolderPath, conflictPolicy, batchId });
   } catch (error) {
     console.log('Failed to move file outside library:', error);
   }
@@ -1195,9 +1208,9 @@ export async function moveFileOutsideLibrary(fileId, filePath, newFolderPath, co
 }
 
 // copy a file
-export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_both') {
+export async function copyFile(filePath, newFolderPath, conflictPolicy = 'keep_both', batchId = null) {
   try {
-    const result = await invoke('copy_file', { filePath, newFolderPath, conflictPolicy });
+    const result = await invoke('copy_file', { filePath, newFolderPath, conflictPolicy, batchId });
     if(result) {
       return result;
     };

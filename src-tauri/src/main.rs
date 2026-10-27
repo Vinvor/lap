@@ -49,6 +49,7 @@ mod t_startup;
 mod t_utils;
 mod t_video;
 mod t_xmp;
+mod t_xmp_files;
 
 /// The main function is the entry point for the Tauri application.
 #[tokio::main]
@@ -350,6 +351,8 @@ async fn main() {
             t_cmds::cancel_file_metadata_requests,
             t_cmds::update_file_info,
             t_cmds::check_selected_file_info,
+            t_cmds::begin_file_transfer_batch,
+            t_cmds::end_file_transfer_batch,
             t_cmds::begin_file_refresh_batch,
             t_cmds::end_file_refresh_batch,
             t_cmds::refresh_selected_file_info,

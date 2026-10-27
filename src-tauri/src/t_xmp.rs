@@ -107,7 +107,39 @@ const MAX_XML_DEPTH: usize = 64;
 const MAX_XML_NODES: usize = 100_000;
 const MAX_XML_EXPANDED_BYTES: usize = 32 * 1024 * 1024;
 
-type SidecarIndex = (i64, PathBuf, HashMap<String, PathBuf>);
+static SIDECAR_REVISION: AtomicU64 = AtomicU64::new(0);
+type SidecarIndex = (i64, PathBuf, u64, HashMap<String, PathBuf>);
+
+/// Filesystem lifecycle mutations invalidate every thread/session lazily.
+/// Update a current, small scan index in-place so batch imports avoid rescanning
+/// the whole destination directory for each newly copied sidecar.
+pub(crate) fn sidecars_changed(paths: &[PathBuf]) {
+    if paths.is_empty() { return; }
+    let previous = SIDECAR_REVISION.fetch_add(1, Ordering::AcqRel);
+    INDEX.with(|index| {
+        let mut index = index.borrow_mut();
+        if paths.len() > 64 { *index = None; return; }
+        let Some((_, folder, revision, names)) = index.as_mut() else { return; };
+        if *revision != previous { return; }
+        let canonical_folder = folder.canonicalize().unwrap_or_else(|_| folder.clone());
+        let changed: Vec<_> = paths.iter().filter(|path| {
+            path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xmp"))
+                && path.parent().is_some_and(|parent| parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf()) == canonical_folder)
+        }).collect();
+        for base in changed.iter().filter_map(|path| path.file_stem().and_then(|name| name.to_str())) {
+            let chosen = changed.iter().copied().filter(|path| path.file_stem().and_then(|name| name.to_str()) == Some(base))
+                .cloned().chain(names.get(base).cloned()).filter(|path| path.is_file()).min();
+            if let Some(path) = chosen { names.insert(base.to_owned(), path); }
+            else {
+                names.remove(base);
+                // A differently cased extension may remain outside the cached winner.
+                // Leave the revision stale so the next lookup rebuilds the directory.
+                return;
+            }
+        }
+        *revision = previous.wrapping_add(1);
+    });
+}
 thread_local! {
     static SCAN: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
     static INDEX: std::cell::RefCell<Option<SidecarIndex>> = const { std::cell::RefCell::new(None) };
@@ -200,11 +232,12 @@ pub fn find_xmp_sidecar(image_path: &Path) -> Option<PathBuf> {
     }
     INDEX.with(|cache| {
         let generation = SCAN.with(|scan| scan.get());
+        let revision = SIDECAR_REVISION.load(Ordering::Acquire);
         let mut cache = cache.borrow_mut();
         if generation.is_none()
             || cache
                 .as_ref()
-                .is_none_or(|(scan, dir, _)| Some(*scan) != generation || dir != parent)
+                .is_none_or(|(scan, dir, old_revision, _)| Some(*scan) != generation || dir != parent || *old_revision != revision)
         {
             let mut names = HashMap::<String, PathBuf>::new();
             for entry in fs::read_dir(parent).ok()?.flatten() {
@@ -221,9 +254,9 @@ pub fn find_xmp_sidecar(image_path: &Path) -> Option<PathBuf> {
                     }
                 }
             }
-            *cache = Some((generation.unwrap_or(0), parent.to_path_buf(), names));
+            *cache = Some((generation.unwrap_or(0), parent.to_path_buf(), revision, names));
         }
-        let names = &cache.as_ref()?.2;
+        let names = &cache.as_ref()?.3;
         names.get(file_name).or_else(|| names.get(stem)).cloned()
     })
 }
@@ -1449,9 +1482,11 @@ impl ExportDirectory {
 
 /// Scoped to one explicit export batch; directories may be interleaved.
 #[derive(Default)]
-struct ExportIndex(HashMap<PathBuf, Result<ExportDirectory, String>>);
+struct ExportIndex(HashMap<PathBuf, Result<ExportDirectory, String>>, u64);
 impl ExportIndex {
     fn directory(&mut self, parent: &Path) -> Result<&mut ExportDirectory, String> {
+        let revision = SIDECAR_REVISION.load(Ordering::Acquire);
+        if self.1 != revision { self.0.clear(); self.1 = revision; }
         self.0
             .entry(parent.to_path_buf())
             .or_insert_with(|| ExportDirectory::read(parent))

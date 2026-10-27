@@ -11077,6 +11077,27 @@ mod smart_folder_name_tests {
 }
 
 #[cfg(test)]
+mod gps_rational_tests {
+    use super::*;
+
+    #[test]
+    fn unsigned_gps_rationals_reject_nan_and_infinity() {
+        for num in [0, 1] {
+            assert_eq!(AFile::gps_rational_values(&Value::Rational(vec![exif::Rational { num, denom: 0 }])), None);
+        }
+        assert_eq!(AFile::gps_rational_values(&Value::Rational(vec![exif::Rational { num: 3, denom: 2 }])), Some(vec![1.5]));
+    }
+
+    #[test]
+    fn signed_gps_rationals_reject_nan_and_infinity() {
+        for num in [0, -1] {
+            assert_eq!(AFile::gps_rational_values(&Value::SRational(vec![exif::SRational { num, denom: 0 }])), None);
+        }
+        assert_eq!(AFile::gps_rational_values(&Value::SRational(vec![exif::SRational { num: -3, denom: 2 }])), Some(vec![-1.5]));
+    }
+}
+
+#[cfg(test)]
 mod cloud_scan_tests {
     use super::*;
 

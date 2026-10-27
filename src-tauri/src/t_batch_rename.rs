@@ -176,6 +176,7 @@ fn plan_files(
     };
     let mut moves = Vec::new();
     let mut parents = HashMap::new();
+    let mut xmp_cache = crate::t_xmp_files::Cache::default();
     for (index, id) in roots.iter().enumerate() {
         let file = &files[*id];
         let old_path = file
@@ -190,7 +191,10 @@ fn plan_files(
             id: **id,
             old_name: file.name.clone(),
             new_name: new_name.clone(),
-            companions: sidecars.len(),
+            companions: sidecars.len() + xmp_cache.count(
+                std::iter::once((old.as_path(), new.as_path()))
+                    .chain(sidecars.iter().map(|p| (p.old_path.as_path(), p.new_path.as_path()))),
+            )?,
         });
         moves.push(RenameMove {
             id: Some(**id),
@@ -214,6 +218,8 @@ fn plan_files(
         }
     }
     preview.errors = check_plan(&moves);
+    preview.errors.extend(xmp_cache.conflicts(moves.iter().map(|p| (p.old.as_path(), p.new.as_path())))?
+        .into_iter().map(|path| format!("Destination XMP already exists: {}", path.display())));
     Ok((preview, moves))
 }
 
@@ -398,7 +404,11 @@ pub fn execute(
             })
         })
         .collect();
+    let xmp = crate::t_xmp_files::Guard::new(
+        moves.iter().map(|p| (p.old.as_path(), p.new.as_path())), crate::t_xmp_files::Operation::Move,
+    )?;
     apply_moves(&moves, || AFile::batch_rename_names(&updates))?;
+    xmp.commit();
     Ok(preview)
 }
 

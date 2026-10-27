@@ -1603,11 +1603,17 @@ pub async fn batch_rename_files(
 
 /// rename a file
 #[tauri::command]
-pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<String> {
-    let sidecar_rename_plan = build_apple_sidecar_rename_plan(file_id, file_path, new_name).ok()?;
+pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Result<Option<String>, String> {
+    let sidecar_rename_plan = build_apple_sidecar_rename_plan(file_id, file_path, new_name)?;
     if !preflight_rename_plan(file_path, new_name, &sidecar_rename_plan) {
-        return None;
+        return Ok(None);
     }
+    let primary_target = Path::new(file_path).with_file_name(new_name);
+    let xmp = crate::t_xmp_files::Guard::new(
+        std::iter::once((Path::new(file_path), primary_target.as_path()))
+            .chain(sidecar_rename_plan.iter().map(|p| (p.old_path.as_path(), p.new_path.as_path()))),
+        crate::t_xmp_files::Operation::Move,
+    )?;
     let original_db_names = collect_original_rename_db_names(file_id, &sidecar_rename_plan);
 
     let mut renamed_sidecars: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -1620,7 +1626,7 @@ pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<Stri
                 error
             );
             rollback_renamed_sidecars(renamed_sidecars);
-            return None;
+            return Ok(None);
         }
         renamed_sidecars.push((plan.old_path.clone(), plan.new_path.clone()));
     }
@@ -1649,13 +1655,14 @@ pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Option<Stri
                     renamed_sidecars,
                     &original_db_names,
                 );
-                return None;
+                return Ok(None);
             }
-            Some(new_file_path)
+            xmp.commit();
+            Ok(Some(new_file_path))
         }
         None => {
             rollback_renamed_sidecars(renamed_sidecars);
-            None
+            Ok(None)
         }
     }
 }
@@ -1668,6 +1675,20 @@ pub fn move_file(
     new_folder_id: i64,
     new_folder_path: &str,
     conflict_policy: &str,
+    batch_id: Option<u64>,
+) -> Result<String, String> {
+    crate::t_xmp_files::with_transfer_cache(batch_id, |xmp_cache| {
+        move_file_with_cache(file_id, file_path, new_folder_id, new_folder_path, conflict_policy, xmp_cache)
+    })
+}
+
+fn move_file_with_cache(
+    file_id: i64,
+    file_path: &str,
+    new_folder_id: i64,
+    new_folder_path: &str,
+    conflict_policy: &str,
+    xmp_cache: &mut crate::t_xmp_files::Cache,
 ) -> Result<String, String> {
     let old_file_info = AFile::get_file_info(file_id).ok().flatten();
     let old_album_id = old_file_info.as_ref().and_then(|file| file.album_id);
@@ -1677,7 +1698,12 @@ pub fn move_file(
         .map(|folder| folder.album_id);
     let policy = t_utils::FileConflictPolicy::from_str(conflict_policy);
     let (primary_target, sidecar_plans) =
-        resolve_group_primary_target(Some(file_id), file_path, new_folder_path, policy)?;
+        resolve_group_primary_target(Some(file_id), file_path, new_folder_path, policy, xmp_cache)?;
+    let xmp = crate::t_xmp_files::Guard::with_cache(
+        std::iter::once((Path::new(file_path), primary_target.as_path()))
+            .chain(sidecar_plans.iter().map(|p| (p.old_path.as_path(), p.new_path.as_path()))),
+        crate::t_xmp_files::Operation::Move, xmp_cache,
+    )?;
     let mut replaced_file_ids = Vec::new();
     let mut source_file_ids = HashSet::from([file_id]);
     for plan in &sidecar_plans {
@@ -1759,7 +1785,17 @@ pub fn move_file(
         }
         transfer.finalize()?;
     }
+    xmp.commit_with_cache(xmp_cache);
     transfer.finalize()
+}
+
+#[tauri::command]
+pub fn begin_file_transfer_batch() -> Result<u64, String> {
+    crate::t_xmp_files::begin_transfer_batch()
+}
+#[tauri::command]
+pub fn end_file_transfer_batch(batch_id: u64) {
+    crate::t_xmp_files::end_transfer_batch(batch_id);
 }
 
 /// move a file outside the library and remove its database record
@@ -1769,10 +1805,28 @@ pub fn move_file_outside_library(
     file_path: &str,
     new_folder_path: &str,
     conflict_policy: &str,
+    batch_id: Option<u64>,
+) -> Result<String, String> {
+    crate::t_xmp_files::with_transfer_cache(batch_id, |xmp_cache| {
+        move_file_outside_library_with_cache(file_id, file_path, new_folder_path, conflict_policy, xmp_cache)
+    })
+}
+
+fn move_file_outside_library_with_cache(
+    file_id: i64,
+    file_path: &str,
+    new_folder_path: &str,
+    conflict_policy: &str,
+    xmp_cache: &mut crate::t_xmp_files::Cache,
 ) -> Result<String, String> {
     let policy = t_utils::FileConflictPolicy::from_str(conflict_policy);
     let (primary_target, sidecar_plans) =
-        resolve_group_primary_target(Some(file_id), file_path, new_folder_path, policy)?;
+        resolve_group_primary_target(Some(file_id), file_path, new_folder_path, policy, xmp_cache)?;
+    let xmp = crate::t_xmp_files::Guard::with_cache(
+        std::iter::once((Path::new(file_path), primary_target.as_path()))
+            .chain(sidecar_plans.iter().map(|p| (p.old_path.as_path(), p.new_path.as_path()))),
+        crate::t_xmp_files::Operation::Move, xmp_cache,
+    )?;
     let mut component_transfers = Vec::new();
     for plan in &sidecar_plans {
         let source_path = plan.old_path.to_string_lossy().into_owned();
@@ -1824,6 +1878,7 @@ pub fn move_file_outside_library(
     for (_, _, transfer) in component_transfers {
         transfer.finalize()?;
     }
+    xmp.commit_with_cache(xmp_cache);
     transfer.finalize()
 }
 
@@ -1833,10 +1888,27 @@ pub fn copy_file(
     file_path: &str,
     new_folder_path: &str,
     conflict_policy: &str,
+    batch_id: Option<u64>,
+) -> Result<String, String> {
+    crate::t_xmp_files::with_transfer_cache(batch_id, |xmp_cache| {
+        copy_file_with_cache(file_path, new_folder_path, conflict_policy, xmp_cache)
+    })
+}
+
+fn copy_file_with_cache(
+    file_path: &str,
+    new_folder_path: &str,
+    conflict_policy: &str,
+    xmp_cache: &mut crate::t_xmp_files::Cache,
 ) -> Result<String, String> {
     let policy = t_utils::FileConflictPolicy::from_str(conflict_policy);
     let (primary_target, sidecar_plans) =
-        resolve_group_primary_target(None, file_path, new_folder_path, policy)?;
+        resolve_group_primary_target(None, file_path, new_folder_path, policy, xmp_cache)?;
+    let xmp = crate::t_xmp_files::Guard::with_cache(
+        std::iter::once((Path::new(file_path), primary_target.as_path()))
+            .chain(sidecar_plans.iter().map(|p| (p.old_path.as_path(), p.new_path.as_path()))),
+        crate::t_xmp_files::Operation::Copy, xmp_cache,
+    )?;
     let mut sidecar_transfers = Vec::new();
     for plan in &sidecar_plans {
         let source_path = plan.old_path.to_string_lossy().into_owned();
@@ -1868,6 +1940,7 @@ pub fn copy_file(
     for transfer in sidecar_transfers {
         transfer.finalize()?;
     }
+    xmp.commit_with_cache(xmp_cache);
     Ok(copied_file_path)
 }
 
@@ -1894,8 +1967,18 @@ pub async fn import_file(
                 let _ = std::fs::remove_file(&new_path);
                 format!("Unsupported file type after copy: {}", new_path)
             })?;
+            let xmp = match crate::t_xmp_files::Guard::new(
+                [(Path::new(&file_path), Path::new(&new_path))], crate::t_xmp_files::Operation::Copy,
+            ) {
+                Ok(guard) => guard,
+                Err(error) => { let _ = fs::remove_file(&new_path); return Err(error); }
+            };
             let now = chrono::Utc::now().timestamp_millis();
-            let (file, _) = AFile::add_to_db(folder_id, &new_path, file_type, now)?;
+            let (file, _) = match AFile::add_to_db(folder_id, &new_path, file_type, now) {
+                Ok(file) => file,
+                Err(error) => { let _ = fs::remove_file(&new_path); return Err(error); }
+            };
+            xmp.commit();
             Ok(Some(file))
         })
     })
@@ -2387,6 +2470,11 @@ fn delete_file_group(
         delete_errors.push(format!("Failed to delete Apple sidecar: {}", error));
     }
 
+    if let Err(error) = crate::t_xmp_files::delete_orphans(
+        std::iter::once(Path::new(file_path))
+            .chain(component_files.iter().filter_map(|file| file.file_path.as_deref().map(Path::new))), permanently,
+    ) { delete_errors.push(error); }
+
     AFile::batch_delete(&deleted_file_ids)
         .map_err(|e| format!("Error while deleting removed files from DB: {}", e))?;
 
@@ -2538,6 +2626,11 @@ pub(crate) fn delete_files_grouped(
             failed_count += 1;
         }
     }
+
+    if let Err(error) = crate::t_xmp_files::delete_orphans(
+        delete_groups.iter().flat_map(|group| std::iter::once(Path::new(&group.primary_path))
+            .chain(group.components.iter().map(|(_, path)| Path::new(path)))), permanently,
+    ) { failed_count += 1; eprintln!("Failed to delete XMP sidecars: {error}"); }
 
     AFile::batch_delete(&deleted_file_ids)
         .map_err(|e| format!("Error while deleting files from DB: {}", e))?;

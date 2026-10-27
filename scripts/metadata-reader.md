@@ -167,3 +167,41 @@ Conflicting bit depths (for example original versus embedded preview) remain NUL
 QuickTime sample-entry BitDepth is excluded because it is not per-channel depth.
 Scan mapping selects only persisted fields, without constructing the extended
 detail rows. No search indexes are added for these three fields.
+
+
+## XMP file lifecycle
+
+Single and batch rename, move (including outside the library), copy, delete and
+file/date-organized import carry XMP independently of the import setting. Folder
+operations already carry their contents. XMP bytes are never rewritten.
+
+Both `photo.xmp` and `photo.raw.xmp` are supported; only the extension is folded.
+A shared stem is retained while another owner remains. A separated file receives
+a full-name sidecar; paired files moved together can retain a common stem. After
+all original owners move, unchanged orphaned source sidecars are cleaned up.
+Full-name metadata takes precedence over another file's shared stem.
+
+Metadata is staged with exclusive destinations and rolls back if the primary
+operation or catalog update fails. Existing destination XMP is never overwritten,
+even with media Replace; keep-both transfers search for a conflict-free name.
+Unclaimed target XMP is also treated as a conflict, preventing accidental adoption.
+Sidecar symlinks are rejected. Unknown sibling formats conservatively retain
+shared metadata. Deletion removes XMP only after the final owner is gone, using
+the same Trash/permanent choice as the media operation.
+
+Batch planning and date-organized imports use operation-local directory indexes.
+Multi-file move/copy actions (including internal drops) share an explicit transfer
+batch index between conflict checks and publication. Successful transfers update
+ownership and sidecar entries in place, including shared-stem cleanup; failures
+discard the index. Before reusing a directory, a metadata check detects outside
+entry changes and rebuilds only that directory. Unix identity/ctime also detects
+replacement and changes with restored mtime. Normal batch mutations update the
+saved directory stamp without enumerating it again. A batch serializes its
+transfers and ends in a frontend `finally` block. Single-file commands use one index for planning and execution.
+Date-organized duplicate detection compares XMP as well as media/AAE content,
+using the same sidecar selection as the copy operation. Publication, rollback
+and deletion invalidate scan/refresh lookup caches across threads. Small updates
+patch the current scan index; removals rebuild it lazily when necessary.
+The isolated metadata harness exercises ownership, conflicts, rollback, paired
+files, naming, symlinks and permanent deletion on temporary files; native Trash,
+cross-volume moves and full desktop/database integration need platform QA.
