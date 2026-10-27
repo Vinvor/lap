@@ -1025,6 +1025,7 @@
       "complete": "Kész",
       "succeeded": "Frissítve: {count}",
       "failed": "Sikertelen: {count}",
+      "warnings": "Figyelmeztetések: {count}",
       "release_requested": "Felszabadítás kérve: {count}",
       "kept_local": "Az eszközön megtartva: {count}",
       "kept_local_hint": "Az eszközön mindig megtartandó fájlok, illetve azok, amelyeknél a Windows nem engedte a Lap számára a tárhely felszabadítását (vezérelt mappahozzáférés)."

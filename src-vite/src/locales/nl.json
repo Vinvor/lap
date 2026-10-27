@@ -1025,6 +1025,7 @@
       "complete": "Voltooid",
       "succeeded": "Bijgewerkt: {count}",
       "failed": "Mislukt: {count}",
+      "warnings": "Waarschuwingen: {count}",
       "release_requested": "Vrijmaken aangevraagd: {count}",
       "kept_local": "Op dit apparaat behouden: {count}",
       "kept_local_hint": "Bestanden die altijd op dit apparaat moeten blijven, of waarvoor Windows Lap geen ruimte liet vrijmaken (gecontroleerde maptoegang)."

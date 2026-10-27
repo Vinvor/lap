@@ -1025,6 +1025,7 @@
       "complete": "完了",
       "succeeded": "更新済み：{count}",
       "failed": "失敗：{count}",
+      "warnings": "警告: {count}",
       "release_requested": "解放を要求済み: {count}",
       "kept_local": "このデバイスに保持: {count}",
       "kept_local_hint": "このデバイスに常に保持するファイル、または Windows が Lap による領域の解放を許可しなかったファイル（コントロールされたフォルダーアクセス）。"

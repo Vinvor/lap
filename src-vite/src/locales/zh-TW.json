@@ -1025,6 +1025,7 @@
       "complete": "完成",
       "succeeded": "已更新：{count}",
       "failed": "失敗：{count}",
+      "warnings": "警告：{count}",
       "release_requested": "已要求釋放：{count}",
       "kept_local": "保留在此裝置：{count}",
       "kept_local_hint": "一律保留在此裝置上的檔案，或 Windows 不允許 Lap 釋放空間的檔案（受控資料夾存取）。"

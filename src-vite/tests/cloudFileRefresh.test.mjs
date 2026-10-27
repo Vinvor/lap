@@ -39,11 +39,11 @@ function fixture(responses, options = {}) {
     window: { addEventListener() {}, removeEventListener() {} }, console: { error() {} },
   };
   const state = new Function(...Object.keys(deps), body +
-    '; return { processed, succeeded, skipped, failed, releaseRequested, keptLocal, lastError, running, cancelled, ready, pendingIds, rebuildPreviews, update: () => runRefresh(filesToUpdate()) };')(...Object.values(deps));
+    '; return { processed, succeeded, skipped, failed, warned, releaseRequested, keptLocal, lastError, lastWarning, running, cancelled, ready, pendingIds, rebuildPreviews, update: () => runRefresh(filesToUpdate()) };')(...Object.values(deps));
   return { state, refreshed, calls, run: () => mounted() };
 }
 const result = (id, extra = {}) => ({ file: { id, cloud_only: false, metadata_pending: false },
-  size_delta: 10, skipped: false, release_requested: false, error: null, ...extra });
+  size_delta: 10, skipped: false, release_requested: false, warning: null, error: null, ...extra });
 
 test('accepted asynchronous release requests are reported without claiming the file is already cloud-only', async () => {
   const updated = result(1, { release_requested: true });
@@ -143,16 +143,18 @@ test('skipped originals retain their metadata result without counting as updated
   assert.deepEqual(f.refreshed, [unchanged]);
 });
 
-test('XMP failure keeps extracted metadata and pending state without reporting success', async () => {
-  const partial = result(1, { error: 'XMP import failed: Malformed XML',
+test('XMP failure keeps extracted metadata and pending state as a warning', async () => {
+  const partial = result(1, { warning: 'XMP import failed: Malformed XML',
     file: { id: 1, icc_profile: 'Display P3', metadata_pending: true } });
   const f = fixture([partial], { freeSpace: false });
   await f.run();
   await f.state.update();
   assert.equal(f.state.succeeded.value, 0);
-  assert.equal(f.state.failed.value, 1);
+  assert.equal(f.state.failed.value, 0);
+  assert.equal(f.state.warned.value, 1);
   assert.deepEqual(f.refreshed, [partial]);
-  assert.equal(f.state.lastError.value, partial.error);
+  assert.equal(f.state.lastWarning.value, partial.warning);
+  assert.equal(f.state.lastError.value, '');
 });
 
 test('preview repair refreshes the full selection even when timestamps are unchanged', async () => {
@@ -166,14 +168,103 @@ test('preview repair refreshes the full selection even when timestamps are uncha
   assert.ok(updates.every(call => call.args.rebuildPreviews === true));
 });
 
-test('cloud-only XMP errors are reported while retaining skipped metadata and pending state', async () => {
-  const partial = result(1, { skipped: true, error: 'XMP import failed: Malformed XML',
+test('cloud-only XMP warnings are reported while retaining skipped metadata and pending state', async () => {
+  const partial = result(1, { skipped: true, warning: 'XMP import failed: Malformed XML',
     file: { id: 1, cloud_only: true, metadata_pending: true, last_scan_time: 12345 } });
   const f = fixture([partial], { freeSpace: false });
   await f.run();
   await f.state.update();
-  assert.equal(f.state.failed.value, 1);
+  assert.equal(f.state.failed.value, 0);
+  assert.equal(f.state.warned.value, 1);
   assert.equal(f.state.succeeded.value, 0);
   assert.deepEqual(f.refreshed, [partial]);
+  assert.equal(f.state.lastWarning.value, partial.warning);
+  assert.equal(f.state.lastError.value, '');
+});
+
+
+test('XMP warnings keep downloaded files local and are separate from failures', async () => {
+  const partial = result(1, { warning: 'XMP import failed: Malformed XML',
+    file: { id: 1, metadata_pending: true, cloud_only: false } });
+  const f = fixture([partial, result(2), new Error('Read failed')]);
+  await f.run();
+  assert.equal(f.state.processed.value, 3);
+  assert.equal(f.state.warned.value, 1);
+  assert.equal(f.state.failed.value, 1);
+  assert.equal(f.state.succeeded.value, 1);
+  assert.equal(f.state.keptLocal.value, 2);
+  assert.equal(f.refreshed[0], partial);
+  assert.equal(f.state.lastWarning.value, partial.warning);
+  assert.equal(f.state.lastError.value, 'Error: Read failed');
+});
+
+test('preview failure takes precedence in counts while retaining an XMP warning', async () => {
+  const partial = result(1, { warning: 'XMP import failed: Malformed XML', error: 'Preview rebuild failed: Permission denied' });
+  const f = fixture([partial], { freeSpace: false });
+  await f.run();
+  f.state.rebuildPreviews.value = true;
+  await f.state.update();
+  assert.equal(f.state.processed.value, 1);
+  assert.equal(f.state.failed.value, 1);
+  assert.equal(f.state.warned.value, 0);
+  assert.equal(f.state.succeeded.value, 0);
+  assert.equal(f.state.lastWarning.value, partial.warning);
   assert.equal(f.state.lastError.value, partial.error);
+  assert.deepEqual(f.refreshed, [partial]);
+});
+
+const content = fs.readFileSync(new URL('../src/components/Content.vue', import.meta.url), 'utf8');
+function contentRefresh(startAnchor, endAnchor, dependencies, name) {
+  const start = content.indexOf(startAnchor);
+  const end = content.indexOf(endAnchor, start);
+  assert.ok(start >= 0 && end > start);
+  return new Function(...Object.keys(dependencies), ts.transpile(content.slice(start, end), { target: ts.ScriptTarget.ES2022 }) +
+    `; return ${name};`)(...Object.values(dependencies));
+}
+
+test('single-file panel refresh preserves metadata and distinguishes warnings from errors', async () => {
+  for (const extra of [{ warning: 'XMP import failed' }, { warning: 'XMP import failed', error: 'Preview rebuild failed' }]) {
+    const updated = result(1, extra);
+    const file = { id: 1 };
+    const messages = [];
+    const deps = {
+      libConfig: { _libraryId: 'test' }, refreshFileInfo: async () => updated,
+      fileInfoRevision: ref(0), tauriEmit: async () => {},
+      toast: { warning: text => messages.push(['warning', text]), error: text => messages.push(['error', text]) },
+    };
+    const refresh = contentRefresh('const refreshFileInfoFromPanel = async', '// update the file info from the file;', deps, 'refreshFileInfoFromPanel');
+    await refresh(file);
+    assert.deepEqual(file, updated.file);
+    assert.deepEqual(messages, [[extra.error ? 'error' : 'warning', [extra.warning, extra.error].filter(Boolean).join('; ')]]);
+    assert.equal(deps.fileInfoRevision.value, 1);
+  }
+});
+
+test('single-file menu refresh reports warnings and failures for both local and skipped originals', async () => {
+  for (const skipped of [false, true]) {
+    for (const extra of [{ warning: 'XMP import failed' }, { warning: 'XMP import failed', error: 'Preview rebuild failed' }]) {
+      const updated = result(1, { skipped, ...extra });
+      const file = { id: 1, file_path: '/photo.jpg' };
+      const messages = [];
+      const deps = {
+        requireOriginalFiles: async () => true, refreshFileInfo: async () => updated,
+        libConfig: { _libraryId: 'test' }, fileInfoRevision: ref(0), tauriEmit: async () => {},
+        updateThumbForFile: async () => {}, updateSelectedImage: async () => {}, selectedItemIndex: ref(0),
+        nextTick: async () => {}, uiStore: { clearActiveAdjustments() {} },
+        localeMsg: ref({ tooltip: { update_image: { success: 'Updated', failed: 'Failed' } } }),
+        toast: { warning: text => messages.push(['warning', text]), error: text => messages.push(['error', text]), success: text => messages.push(['success', text]) },
+      };
+      const refresh = contentRefresh('const updateFile = async', '// force-update the thumbnail for the file', deps, 'updateFile');
+      await refresh(file, true);
+      assert.equal(file.id, updated.file.id);
+      assert.deepEqual(messages, [[extra.error ? 'error' : 'warning', [extra.warning, extra.error].filter(Boolean).join('; ')]]);
+    }
+  }
+});
+
+test('all supported locales include the refresh warnings count with its placeholder', () => {
+  for (const name of ['en','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','zh-CN','zh-TW']) {
+    const locale = JSON.parse(fs.readFileSync(new URL(`../src/locales/${name}.json`, import.meta.url), 'utf8'));
+    assert.match(locale.msgbox.file_refresh.warnings, /\{count\}/, name);
+  }
 });

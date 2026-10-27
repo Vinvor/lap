@@ -9,8 +9,9 @@
             <span class="tabular-nums">{{ processed.toLocaleString() }} / {{ activeIds.length.toLocaleString() }}</span>
           </div>
           <progress class="progress progress-primary w-full" :value="processed" :max="Math.max(activeIds.length, 1)"></progress>
-          <div v-if="!checking" class="flex gap-3 text-base-content/60">
+          <div v-if="!checking" class="flex flex-wrap gap-x-3 gap-y-1 text-base-content/60">
             <span>{{ $t('msgbox.file_refresh.succeeded', { count: succeeded.toLocaleString() }) }}</span>
+            <span v-if="warned" class="text-warning">{{ $t('msgbox.file_refresh.warnings', { count: warned.toLocaleString() }) }}</span>
             <span v-if="skipped">{{ $t('msgbox.file_refresh.skipped', { count: skipped.toLocaleString() }) }}</span>
             <span :class="{ 'text-error/70': failed > 0 }">{{ $t('msgbox.file_refresh.failed', { count: failed.toLocaleString() }) }}</span>
           </div>
@@ -27,7 +28,8 @@
         <input v-model="rebuildPreviews" type="checkbox" class="checkbox checkbox-xs" />
         {{ $t('msgbox.file_refresh.rebuild_previews') }}
       </label>
-      <p v-if="lastError" class="text-xs text-error/70 break-words" role="alert">{{ lastError }}</p>
+      <p v-if="lastWarning" class="text-xs text-warning wrap-break-word" role="status">{{ lastWarning }}</p>
+      <p v-if="lastError" class="text-xs text-error/70 wrap-break-word" role="alert">{{ lastError }}</p>
     </section>
     <div class="mt-4 flex justify-end gap-4">
       <button class="t-button-default" :disabled="running && cancelled" @click="closeOrCancel">
@@ -46,7 +48,7 @@ import { getRawDisplayOptions } from '@/common/rawDisplay';
 import { useUIStore } from '@/stores/uiStore';
 import ModalDialog from '@/components/ModalDialog.vue';
 
-type FileRefreshResult = { file: any; size_delta: number; skipped: boolean; release_requested: boolean; error?: string | null };
+type FileRefreshResult = { file: any; size_delta: number; skipped: boolean; release_requested: boolean; warning?: string | null; error?: string | null };
 const props = defineProps<{ fileIds: number[]; libraryId: string; freeSpace?: boolean; finishRefresh: (results: FileRefreshResult[]) => Promise<void> }>();
 const emit = defineEmits(['close']);
 const uiStore = useUIStore();
@@ -63,8 +65,10 @@ const processed = ref(0);
 const succeeded = ref(0);
 const skipped = ref(0);
 const failed = ref(0);
+const warned = ref(0);
 const releaseRequested = ref(0);
 const lastError = ref('');
+const lastWarning = ref('');
 const keptLocal = ref(0);
 let disposed = false;
 
@@ -119,6 +123,7 @@ async function runRefresh(ids: number[]) {
   activeIds.value = [...ids];
   processed.value = 0;
   lastError.value = '';
+  lastWarning.value = '';
   // Sequential background commands bound memory and permit cancellation between
   // files. The backend also checks the library under its library-switch lock.
   let batchId: number | undefined;
@@ -139,10 +144,12 @@ async function runRefresh(ids: number[]) {
         if (result && props.freeSpace) result.release_requested ? releaseRequested.value++ : keptLocal.value++;
         if (result) {
           results.push(result);
+          if (result.warning) lastWarning.value = result.warning;
           if (result.error) {
             failed.value++;
             lastError.value = result.error;
-          } else if (result.skipped) skipped.value++;
+          } else if (result.warning) warned.value++;
+          else if (result.skipped) skipped.value++;
           else succeeded.value++;
         }
         else failed.value++;

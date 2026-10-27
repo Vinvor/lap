@@ -9439,7 +9439,9 @@ const refreshFileInfoFromPanel = async (file: any) => {
   if (libraryId !== libConfig._libraryId || Number(file.id) !== fileId) return;
   if (!result?.file) throw new Error('File info refresh failed');
   Object.assign(file, result.file);
-  if (result.error) toast.warning(result.error);
+  const message = [result.warning, result.error].filter(Boolean).join('; ');
+  if (result.error) toast.error(message);
+  else if (result.warning) toast.warning(message);
   fileInfoRevision.value++;
   void tauriEmit('tags-changed');
 };
@@ -9451,11 +9453,13 @@ const updateFile = async (file: any, isRefresh = false) => {
     // The refresh command leaves an unchanged cloud-only file unread, so skip
     // the forced thumbnail and image reload that would download it.
     const refreshed = isRefresh ? await refreshFileInfo(libConfig._libraryId, file.id) : null;
+    const refreshMessage = [refreshed?.warning, refreshed?.error].filter(Boolean).join('; ');
     if (refreshed?.skipped) {
       if (refreshed.file) Object.assign(file, refreshed.file);
       fileInfoRevision.value++;
       void tauriEmit('tags-changed');
-      if (refreshed?.error) toast.warning(refreshed.error);
+      if (refreshed?.error) toast.error(refreshMessage);
+      else if (refreshed?.warning) toast.warning(refreshMessage);
       else toast.success(localeMsg.value.tooltip.update_image.success);
       return;
     }
@@ -9477,7 +9481,8 @@ const updateFile = async (file: any, isRefresh = false) => {
       uiStore.clearActiveAdjustments();
 
       if (isRefresh) {
-        if (refreshed?.error) toast.warning(refreshed.error);
+        if (refreshed?.error) toast.error(refreshMessage);
+        else if (refreshed?.warning) toast.warning(refreshMessage);
         else toast.success(localeMsg.value.tooltip.update_image.success);
       }
     } else if (isRefresh) {

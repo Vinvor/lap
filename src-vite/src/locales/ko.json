@@ -1025,6 +1025,7 @@
       "complete": "완료",
       "succeeded": "업데이트됨: {count}",
       "failed": "실패: {count}",
+      "warnings": "경고: {count}",
       "release_requested": "공간 확보 요청: {count}",
       "kept_local": "이 장치에 유지: {count}",
       "kept_local_hint": "이 장치에 항상 유지하는 파일 또는 Windows가 Lap의 공간 확보를 허용하지 않은 파일입니다(제어된 폴더 액세스)."

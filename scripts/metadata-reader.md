@@ -92,12 +92,6 @@ index; the index is dropped at the end of the batch. Discovery work is therefore
 linear in visited directory entries plus selected files, rather than repeating
 whole-directory enumeration for every selected file.
 
-Multi-selection refreshes create a library-bound index session before the first
-file and release it in the dialog's `finally` block, including cancellation and
-partial failures. Each background command enters the same index scope even when
-it runs on a different worker thread. Abandoned sessions are capped and reclaimed
-on subsequent batch creation. Single-file refresh commands remain compatible.
-
 Only direct photo-subject RDF Description properties are imported; nested and
 identified resources remain preserved XML rather than becoming photo metadata.
 JPEG 2000 UUID XMP packets use the same bounded container extraction as other
@@ -106,6 +100,60 @@ supported ISO box formats.
 A non-unique `atags(name COLLATE NOCASE)` index supports case-insensitive tag
 lookup without merging or rejecting existing differently-cased tag rows. Existing
 libraries build this index once during schema initialization.
+
+## File-info refresh contract
+
+`check_selected_file_info` resolves each file's current catalog path under the
+library-switch lock and delegates to `AFile::needs_file_info_refresh`. The check
+uses catalog values, directory discovery and filesystem metadata only. It never
+reads original or sidecar contents, extracts metadata or downloads online-only
+files. A file needs updating when any of these conditions holds:
+
+- `metadata_pending` is set and the original is available locally.
+- `last_scan_time` is missing or nonpositive.
+- The original's modification time is later than `last_scan_time`.
+- The original's current size differs from its catalog size.
+- Automatic XMP import is enabled and the selected sidecar's modification time is
+  later than `last_scan_time`.
+
+Missing technical fields alone do not trigger an update. Missing or inaccessible
+files and failed checks are reported as errors, not classified as up to date.
+Disabling automatic XMP import excludes sidecars from this decision.
+
+A normal multi-selection dialog uses two separate library-bound index sessions:
+one for checking the selection, closed before confirmation, and a new one for
+refreshing the confirmed files. Each stage releases its session in `finally`,
+including cancellation and partial failures. Commands share their stage's index
+across background worker threads; expired sessions are reclaimed on subsequent
+creation. Download/index/free-space mode goes directly to a refresh session.
+
+Checking timestamps must not block preview repair. With **Rebuild previews**,
+`filesToUpdate()` selects the entire selection even if no file needs a metadata
+update. `refresh_selected_file_info` refreshes metadata and then calls
+`AThumb::delete` for results where `skipped` is false, marking the thumbnail as
+absent for later regeneration. A deletion error is retained in
+`FileRefreshResult.error` alongside the refreshed file. Unchanged online-only
+originals remain `skipped`: their contents and previews are left untouched, and
+local sidecars may still be imported when enabled. The check timestamp advances;
+the original's pending marker is retained.
+
+Automatic XMP import failures have different reporting contracts:
+
+- Scan/import preserves the successful primary file operation, logs the XMP
+  failure and sets `metadata_pending` for retry. This applies only when automatic
+  import is enabled; database failures can still propagate normally.
+- Explicit refresh keeps successfully extracted catalog metadata and returns the
+  XMP failure in `FileRefreshResult.warning`. Local files remain pending for retry.
+  The caller keeps the returned file even when a later stage reports an error.
+- An unchanged online-only original also returns sidecar import errors in its
+  skipped result and advances `last_scan_time`, avoiding repeated offers for the
+  same unchanged broken sidecar without downloading the original.
+
+The dialog reports XMP-only results in a separate warnings count. Preview-rebuild,
+thumbnail-generation and release errors remain failures. If both a warning and an
+error occur for one file, it is counted once as failed and both messages remain
+visible. Successfully updated metadata is retained in all returned results.
+Single-file refresh likewise distinguishes warning and error notifications.
 
 ## Lap Favorite schema
 

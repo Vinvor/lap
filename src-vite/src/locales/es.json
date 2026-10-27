@@ -1025,6 +1025,7 @@
       "complete": "Completado",
       "succeeded": "Actualizados: {count}",
       "failed": "Fallidos: {count}",
+      "warnings": "Advertencias: {count}",
       "release_requested": "Liberación solicitada: {count}",
       "kept_local": "Conservados en este dispositivo: {count}",
       "kept_local_hint": "Archivos que mantienes siempre en este dispositivo o cuyo espacio Windows no permitió liberar a Lap (acceso controlado a carpetas)."

@@ -3069,7 +3069,9 @@ pub struct FileRefreshResult {
     skipped: bool,
     /// The provider accepted an asynchronous release request.
     release_requested: bool,
-    /// A later stage failed after metadata was already updated.
+    /// Organization metadata could not be imported; the file metadata is retained.
+    warning: Option<String>,
+    /// A required later stage failed after metadata was already updated.
     error: Option<String>,
 }
 
@@ -3093,7 +3095,7 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
         // the check time so an unchanged broken sidecar is not offered forever.
         AFile::update_column(file_id, "last_scan_time", &checked_at)?;
         let file = AFile::get_file_info(file_id)?.unwrap_or(old);
-        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, error: import_error, ..Default::default() }));
+        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, warning: import_error, ..Default::default() }));
     }
     let (updated, import_error) = AFile::update_file_info_with_xmp_error(
         file_id, path, chrono::Utc::now().timestamp_millis(),
@@ -3114,7 +3116,7 @@ fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, 
         size_delta: file.size - old.size,
         file,
         skipped: false,
-        error: import_error,
+        warning: import_error,
         ..Default::default()
     }))
 }
@@ -3186,7 +3188,7 @@ pub async fn index_cloud_file(
         let path = AFile::get_file_info(file_id)?.and_then(|file| file.file_path).ok_or("File not found")?;
         let was_cloud_only = t_utils::is_cloud_only_path(&path);
         let Some(mut result) = refresh_file(file_id, true)? else { return Ok(None) };
-        if !was_cloud_only || result.error.is_some() {
+        if !was_cloud_only || result.error.is_some() || result.warning.is_some() {
             return Ok(Some(result));
         }
         // Keep the refreshed file even if thumbnail generation or release fails.
