@@ -143,7 +143,7 @@
         </button>
         <SmoothHeight>
           <div v-if="showOrganizationPanel" class="pt-3 space-y-1.5">
-            <FavoriteRatingControl
+            <FavoriteRatingControl class="pl-4"
               :favorite="Boolean(fileInfo?.is_favorite)"
               :rating="Number(fileInfo?.rating || 0)"
               :culling="Number(fileInfo?.culling_flag ?? fileInfo?.cullingFlag ?? 0)"
@@ -154,22 +154,21 @@
               @culling="(cullingFlag) => emit('setCulling', cullingFlag)"
             />
 
-          <div class="pl-4 grid grid-cols-[84px_minmax(0,1fr)] gap-y-1.5 gap-x-4 text-xs">
             <!-- Tags -->
             <template v-if="displayTags.length">
-              <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('file_info.tags') }}</div>
-              <div class="group/field flex items-center min-h-6 gap-1">
+              <div class="pl-4 flex items-center min-h-8 gap-1">
                 <div class="text-[12px] text-base-content/70 flex flex-wrap gap-1 flex-1 min-w-0 cursor-pointer" @click.stop="emit('quickEditTag')">
                   <span
                     v-for="tag in displayTags"
                     :key="tag.id"
                     :title="tag.group_name"
-                    class="badge badge-sm badge-outline border-base-content/20 bg-base-content/5 font-medium text-base-content/70"
+                    class="badge badge-sm badge-outline border-base-content/5 bg-base-content/5 font-medium text-base-content/70 hover:text-base-content"
                   >{{ tag.name }}</span>
                 </div>
               </div>
             </template>
 
+          <div class="pl-4 grid grid-cols-[84px_minmax(0,1fr)] gap-y-1.5 gap-x-4 text-xs">
             <!-- Collections -->
             <template v-if="fileCollections.length">
               <div class="flex items-center text-[11px] text-base-content/30 min-h-6 py-1.5">{{ $t('collection.title') }}</div>
@@ -182,7 +181,7 @@
                     class="inline-flex items-center gap-1 text-[12px] font-medium text-base-content/70 transition-colors hover:text-base-content cursor-pointer"
                     @click.stop="emit('quickEditCollection')"
                   >
-                    <IconBookmark class="h-3.5 w-3.5 shrink-0" />
+                    <IconStack class="h-4 w-4 shrink-0" />
                     {{ collection.name }}
                   </button>
                 </div>
@@ -307,7 +306,6 @@
             <Breadcrumb
               :icon="IconFolder"
               :items="generalFolderBreadcrumbs"
-              size="small"
               @navigate="(path: string) => emit('navigateFolder', path)"
             />
 
@@ -538,7 +536,7 @@ import {
   IconZoomIn,
   IconZoomOut,
   IconLivePhoto,
-  IconBookmark,
+  IconStack,
   IconPerson,
 } from '@/common/icons';
 import Breadcrumb from '@/components/Breadcrumb.vue';

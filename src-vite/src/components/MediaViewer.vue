@@ -143,7 +143,7 @@
             @click="$emit('item-action', { action: 'tag', index: fileIndex })"
           />
           <TButton
-            :icon="IconBookmark"
+            :icon="IconStack"
             :disabled="fileIndex < 0 || isSlideShow || !canInteract"
             :selected="file?.has_collections && !isSlideShow"
             :tooltip="$t('menu.meta.collection')"
@@ -480,7 +480,7 @@ import {
   IconFlagOff,
   IconStar,
   IconStarFilled,
-  IconBookmark,
+  IconStack,
   IconTag,
   IconComment,
   IconRotate,
@@ -1029,7 +1029,7 @@ const quickViewStatusBadges = computed<StatusBadge[]>(() => {
     });
   }
   if (props.file?.has_tags) metaIcons.push({ icon: IconTag });
-  if (props.file?.has_collections) metaIcons.push({ icon: IconBookmark });
+  if (props.file?.has_collections) metaIcons.push({ icon: IconStack });
   if (props.file?.comments?.length > 0) metaIcons.push({ icon: IconComment });
   if (normalizedFileRotate.value > 0) {
     metaIcons.push({

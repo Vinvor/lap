@@ -879,7 +879,7 @@ import {
   IconCamera,
   IconHeartFilled,
   IconHistory,
-  IconBookmark,
+  IconStack,
   IconFileSearch,
   IconPerson,
   IconSortingAsc,
@@ -3675,7 +3675,7 @@ watch([dedupScanKey, similarPhotoGroupingThreshold], ([key, threshold]) => {
 }, { immediate: true });
 
 const currentTitleIcon = computed(() => {
-  if (libConfig.activePane === 'collection') return IconBookmark;
+  if (libConfig.activePane === 'collection') return IconStack;
   switch (tempViewMode.value) {
     case 'none':
       if (contentTitle.value) {

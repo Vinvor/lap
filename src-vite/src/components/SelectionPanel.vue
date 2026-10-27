@@ -115,7 +115,7 @@
             {{ $t('menu.meta.tag') }}
           </PanelActionButton>
           <PanelActionButton
-            :icon="IconBookmark"
+            :icon="IconStack"
             :disabled="selectedCount === 0"
             @click="$emit('addToCollection')"
           >
@@ -199,7 +199,7 @@
           </PanelActionButton>
           <PanelActionButton
             v-if="querySource === 'collection'"
-            :icon="IconBookmarkOff"
+            :icon="IconStack"
             :disabled="selectedCount === 0"
             @click="$emit('removeFromCollection')"
           >
@@ -226,8 +226,7 @@ import {
   IconTag,
   IconTrash,
   IconRename,
-  IconBookmarkOff,
-  IconBookmark,
+  IconStack,
 } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 import FavoriteRatingControl from '@/components/FavoriteRatingControl.vue';

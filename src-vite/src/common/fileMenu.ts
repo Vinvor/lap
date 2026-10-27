@@ -26,7 +26,7 @@ import {
   IconFlag,
   IconFlagFilled,
   IconFlagOff,
-  IconBookmark,
+  IconStack,
   IconSplitOn,
   IconSplitOn4,
   IconCollage,
@@ -253,7 +253,7 @@ export const useFileMenuItems = (
       },
       {
         label: localeMsg.value.menu.meta.collection,
-        icon: markRaw(IconBookmark),
+        icon: markRaw(IconStack),
         shortcut: shortcut('meta.collection'),
         action: createAction('add-to-collection'),
       },
