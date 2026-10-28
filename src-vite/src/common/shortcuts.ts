@@ -49,6 +49,7 @@ export type ShortcutActionId =
   | 'meta.rotateCounterclockwise'
   | 'meta.info'
   | 'view.quickPreview'
+  | 'view.togglePlayback'
   | 'view.close'
   | 'view.next'
   | 'view.previous'
@@ -372,6 +373,11 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     id: 'view.close',
     contexts: ['content', 'image-viewer', 'settings'],
     defaultBindings: [{ key: 'Escape', label: 'Esc' }],
+  },
+  {
+    id: 'view.togglePlayback',
+    contexts: ['content', 'media-viewer', 'image-viewer'],
+    defaultBindings: [{ key: ' ', label: 'Space' }, { key: 'Space', label: 'Space' }],
   },
   {
     id: 'view.next',

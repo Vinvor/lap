@@ -1,4 +1,15 @@
 import { invoke } from '@tauri-apps/api/core';
+import { matchesShortcut, type ShortcutPlatform } from './shortcuts';
+
+export function handleVideoPlaybackShortcut(event: KeyboardEvent, platform: ShortcutPlatform, togglePlay: () => void) {
+  if (!matchesShortcut('view.togglePlayback', event, platform)) return;
+  const target = event.target as HTMLElement | null;
+  if (target?.closest?.('input, textarea, [contenteditable]:not([contenteditable="false"])')) return;
+  // Intercept before video.js controls, so one press performs one action.
+  event.preventDefault();
+  event.stopPropagation();
+  if (!event.repeat) togglePlay();
+}
 
 export interface VideoPrepareResult {
   url: string;

@@ -220,6 +220,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { config, libConfig } from '@/common/config';
 import { isWin, isMac, isLinux, setTheme, getSlideShowInterval, SCALE_VALUES } from '@/common/utils';
 import { matchesShortcut, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
+import { handleVideoPlaybackShortcut } from '@/common/video';
 import {
   editFileComment,
   getFileCollections,
@@ -374,6 +375,7 @@ onMounted(async() => {
   appWindow.setFocus();
   applyViewerScale(Number(config.settings.scale || 1));
   window.addEventListener('keydown', handleKeyDown);
+  window.addEventListener('keydown', handleVideoSpaceKeyDown, true);
   window.addEventListener('resize', handleResize);
 
   const urlParams = new URLSearchParams(window.location.search);
@@ -590,6 +592,7 @@ onMounted(async() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  window.removeEventListener('keydown', handleVideoSpaceKeyDown, true);
   window.removeEventListener('resize', handleResize);
   document.documentElement.style.fontSize = '';
   clearSlideShowTimer();
@@ -602,6 +605,11 @@ onUnmounted(() => {
 });
 
 // Handle keyboard shortcuts
+function handleVideoSpaceKeyDown(event: KeyboardEvent) {
+  if (uiStore.inputStack.length > 0 || getFileInfoByPane(getActivePane())?.file_type !== 2) return;
+  handleVideoPlaybackShortcut(event, shortcutPlatform, () => getViewerRef(getActivePane())?.togglePlay?.());
+}
+
 function handleKeyDown(event: KeyboardEvent) {
   if(uiStore.inputStack.length > 0) {
     return;

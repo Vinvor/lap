@@ -797,6 +797,7 @@ import {
 } from '@/common/thumbnailProfiles';
 import { getShortcutLabel, matchesShortcut, ShortcutActionId, ShortcutPlatform, VIEW_BACKGROUND_SHORTCUTS } from '@/common/shortcuts';
 import { getSmartTagById } from '@/common/smartTags';
+import { handleVideoPlaybackShortcut } from '@/common/video';
 import { clearFolderFileCounts, setFolderFileCount, getCountedFolderPaths } from '@/composables/useAlbumSelection';
 import { createEmptyLibraryCounts } from '@/stores/libraryStore';
 import { getAlbumScanState, getAlbumScanIcon, shouldAnimateAlbumScanIcon } from '@/common/scanStatus';
@@ -4690,7 +4691,7 @@ function handleLocalKeyDown(event: KeyboardEvent) {
     return;
   }
 
-  if (showQuickView.value && (event.key === ' ' || event.key === 'Space') && matchesShortcut('view.quickPreview', event, shortcutPlatform)) {
+  if (showQuickView.value && fileList.value[selectedItemIndex.value]?.file_type !== 2 && (event.key === ' ' || event.key === 'Space') && matchesShortcut('view.quickPreview', event, shortcutPlatform)) {
     event.preventDefault();
     // macOS dispatches this shortcut through the capture/global channel.
     if (!isMac && !event.repeat) closeQuickPreview();
@@ -4957,6 +4958,12 @@ function handleLocalKeyDown(event: KeyboardEvent) {
   }
 }
 
+function handleVideoSpaceKeyDown(event: KeyboardEvent) {
+  if (getActivePreviewMode() === 'none' || fileList.value[selectedItemIndex.value]?.file_type !== 2
+    || uiStore.inputStack.length > 0 || uiStore.activePane === 'left-sidebar') return;
+  handleVideoPlaybackShortcut(event, shortcutPlatform, () => getActivePreviewMediaRef()?.togglePlay?.());
+}
+
 function handleQuickPreviewShortcut(event: { key: string; code?: string; repeat?: boolean }): boolean {
   if (!matchesShortcut('view.quickPreview', event, shortcutPlatform)) {
     return false;
@@ -4974,6 +4981,9 @@ function handleQuickPreviewShortcut(event: { key: string; code?: string; repeat?
   if (event.key !== 'Space' && event.key !== ' ') {
     return false;
   }
+
+  // Video Space is dispatched once by the capture handler above.
+  if (getActivePreviewMode() !== 'none' && fileList.value[selectedItemIndex.value]?.file_type === 2) return true;
 
   if (getActivePreviewMode() === 'quick-view') {
     closeQuickPreview();
@@ -5607,6 +5617,7 @@ onMounted( async() => {
   hasRestoredInitialSelection = false;
 
   window.addEventListener('keydown', handleLocalKeyDown);
+  window.addEventListener('keydown', handleVideoSpaceKeyDown, true);
   window.addEventListener(PREVIEW_WINDOW_FOCUS_RESTORED, restoreOpenPreviewFocus);
   window.addEventListener('keyup', handleLocalKeyUp);
   unlistenAlbumAccessChanged = await listen('album-accessibility-changed', (event: any) => {
@@ -6170,6 +6181,7 @@ onBeforeUnmount(() => {
   }
   unlistenAlbumAccessChanged?.();
   window.removeEventListener('keydown', handleLocalKeyDown);
+  window.removeEventListener('keydown', handleVideoSpaceKeyDown, true);
   window.removeEventListener(PREVIEW_WINDOW_FOCUS_RESTORED, restoreOpenPreviewFocus);
   window.removeEventListener('keyup', handleLocalKeyUp);
   // unlisten
