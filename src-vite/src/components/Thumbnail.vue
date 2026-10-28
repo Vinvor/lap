@@ -165,10 +165,11 @@
           <span class="leading-none">{{ rawJpegPairBadge }}</span>
         </div>
         <div
-          v-if="videoDurationBadge"
+          v-if="file.file_type === 2"
           class="thumb-badge"
         >
-          {{ videoDurationBadge }}
+          <template v-if="videoDurationBadge">{{ videoDurationBadge }}</template>
+          <IconVideo v-else class="h-3.5 w-3.5 shrink-0" />
         </div>
         <div
           v-if="dedupStatus"
@@ -252,6 +253,7 @@ import {
   IconExclamation,
   IconCloud,
   IconPhoto,
+  IconVideo,
   IconHeartFilled,
   IconTag,
   IconStack,
@@ -673,7 +675,7 @@ const videoDurationBadge = computed(() => {
   if (props.file?.file_type !== 2) return '';
 
   const duration = Number(props.file?.duration);
-  if (!Number.isFinite(duration)) return '';
+  if (!Number.isFinite(duration) || duration <= 0) return '';
 
   const formattedDuration = formatDuration(duration);
   return formattedDuration;
@@ -707,7 +709,7 @@ const thumbnailBadge = computed(() => {
 });
 
 const hasBottomMediaBadges = computed(() => (
-  isLivePhoto.value || isMotionPhoto.value || isRawJpegPair.value || Boolean(videoDurationBadge.value) || Boolean(props.dedupStatus)
+  isLivePhoto.value || isMotionPhoto.value || isRawJpegPair.value || props.file?.file_type === 2 || Boolean(props.dedupStatus)
 ));
 
 const statusBadges = computed<ThumbnailBadge[]>(() => {

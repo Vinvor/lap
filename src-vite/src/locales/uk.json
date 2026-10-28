@@ -1178,6 +1178,7 @@
     "dimension": "Розміри",
     "size": "Розмір",
     "duration": "Тривалість",
+    "unknown_duration": "Невідомо",
     "created_at": "Створено",
     "modified_at": "Змінено",
     "last_scan_time": "Востаннє проскановано",

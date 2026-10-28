@@ -1178,6 +1178,7 @@
     "dimension": "Afmetingen",
     "size": "Grootte",
     "duration": "Duur",
+    "unknown_duration": "Onbekend",
     "created_at": "Aangemaakt op",
     "modified_at": "Gewijzigd op",
     "last_scan_time": "Laatst gescand",

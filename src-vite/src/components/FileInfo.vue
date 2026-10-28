@@ -338,9 +338,9 @@
               <div class="min-h-6 text-[12px] text-base-content/70 wrap-break-word py-1">{{ row.value }}</div>
             </template>
             <!-- Duration -->
-            <template v-if="generalFileInfo?.file_type === 2 && generalFileInfo?.duration != null">
+            <template v-if="generalFileInfo?.file_type === 2">
               <div class="flex items-center text-[11px] text-base-content/30 h-6">{{ $t('file_info.duration') }}</div>
-              <div class="flex items-center text-[12px] text-base-content/70">{{ formatDuration(generalFileInfo?.duration) }}</div>
+              <div class="flex items-center text-[12px] text-base-content/70">{{ Number.isFinite(generalFileInfo?.duration) && generalFileInfo.duration > 0 ? formatDuration(generalFileInfo.duration) : $t('file_info.unknown_duration') }}</div>
             </template>
 
             <div class="col-span-2">

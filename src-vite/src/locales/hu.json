@@ -1178,6 +1178,7 @@
     "dimension": "Méretek",
     "size": "Méret",
     "duration": "Időtartam",
+    "unknown_duration": "Ismeretlen",
     "created_at": "Létrehozva",
     "modified_at": "Módosítva",
     "last_scan_time": "Utolsó beolvasás",

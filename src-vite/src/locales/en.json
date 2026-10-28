@@ -1178,6 +1178,7 @@
     "dimension": "Dimension",
     "size": "Size",
     "duration": "Duration",
+    "unknown_duration": "Unknown",
     "created_at": "Created at",
     "modified_at": "Modified at",
     "last_scan_time": "Last scanned",

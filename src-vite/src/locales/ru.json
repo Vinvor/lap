@@ -1178,6 +1178,7 @@
     "dimension": "Размеры",
     "size": "Размер",
     "duration": "Длительность",
+    "unknown_duration": "Неизвестно",
     "created_at": "Создано",
     "modified_at": "Изменено",
     "last_scan_time": "Последнее сканирование",

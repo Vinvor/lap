@@ -1178,6 +1178,7 @@
     "dimension": "尺寸",
     "size": "大小",
     "duration": "長度",
+    "unknown_duration": "未知",
     "created_at": "建立時間",
     "modified_at": "修改時間",
     "last_scan_time": "上次掃描",

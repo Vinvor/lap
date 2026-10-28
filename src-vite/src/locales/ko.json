@@ -1178,6 +1178,7 @@
     "dimension": "픽셀 크기",
     "size": "크기",
     "duration": "재생시간",
+    "unknown_duration": "알 수 없음",
     "created_at": "생성일",
     "modified_at": "수정일",
     "last_scan_time": "최근 스캔",
