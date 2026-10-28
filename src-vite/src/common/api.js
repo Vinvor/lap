@@ -1345,6 +1345,11 @@ export async function updateFileInfo(fileId, filePath) {
   return null;
 }
 
+// Regenerate a video thumbnail without refreshing metadata.
+export async function changeVideoThumbnail(libraryId, fileId, seekPercent) {
+  return invoke('change_video_thumbnail', { libraryId, fileId, seekPercent, thumbnailSize: config.settings.thumbnailSize });
+}
+
 // refresh a file's info from disk; returns { file, size_delta, skipped }
 export async function refreshFileInfo(libraryId, fileId) {
   try {

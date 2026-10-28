@@ -1162,6 +1162,7 @@
     "title": "파일 정보",
     "preview": "미리보기",
     "thumbnail": "썸네일",
+    "change_thumbnail": "썸네일 변경",
     "histogram": "히스토그램",
     "preview_size": "썸네일 크기",
     "general": "일반",

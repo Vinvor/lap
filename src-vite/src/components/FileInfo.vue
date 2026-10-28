@@ -38,8 +38,16 @@
             :class="{ 'rotate-90': showPreviewPanel }"
             @click.stop="togglePreview"
           />
-          <span class="py-1 font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.preview') }}</span>
-          <div v-if="showPreviewPanel" role="tablist" class="tabs tabs-xs shrink-0">
+          <span class="py-1 font-bold mr-auto uppercase text-xs tracking-wide text-base-content/30">
+            {{ $t('file_info.preview') }}
+          </span>
+          <button v-if="showPreviewPanel && isVideoFile" type="button"
+            class="tab h-6 text-xs shrink-0 hover:text-primary cursor-pointer disabled:opacity-40 disabled:cursor-wait"
+            :disabled="!canChangeThumbnail || changingThumbnail || fileInfoBusy || !changeThumbnail || isOriginalUnavailable(fileInfo)"
+            :aria-busy="changingThumbnail"
+            @click.stop="changePreviewThumbnail"
+          >{{ $t('file_info.change_thumbnail') }}{{ changingThumbnail ? '…' : '' }}</button>
+          <div v-else-if="showPreviewPanel" role="tablist" class="tabs tabs-xs shrink-0">
             <button
               role="tab"
               :class="['tab', !isHistogramPreview ? 'tab-active text-primary' : '']"
@@ -52,13 +60,6 @@
               @click.stop="setPreviewMode('histogram')"
             >{{ $t('file_info.histogram') }}</button>
           </div>
-          <!-- <span
-            v-if="showPreviewPanel && previewTagLabel"
-            class="badge badge-xs flex items-center gap-0.5 bg-base-100/30 text-base-content/70"
-          >
-            <IconLivePhoto v-if="isLivePhoto && !isHistogramPreview" class="h-3 w-3 shrink-0" />
-            {{ previewTagLabel }}
-          </span> -->
         </div>
 
         <SmoothHeight>
@@ -70,6 +71,11 @@
               @pointerenter="playVideoPreviewOnHover"
               @pointerleave="stopPreviewVideo"
             >
+              <span v-if="previewFormatLabel" class="thumb-badge pointer-events-none absolute right-1.5 top-1.5 z-20">
+                <IconLivePhoto v-if="isLivePhoto || isMotionPhoto" class="h-3.5 w-3.5 shrink-0" />
+                <IconVideo v-else-if="isVideoFile" class="h-3.5 w-3.5 shrink-0" />
+                {{ previewFormatLabel }}
+              </span>
               <div
                 class="absolute top-2 left-2 flex bg-base-100/30 hover:bg-base-100/70 rounded-box z-20 cursor-pointer opacity-0 pointer-events-none transition-opacity duration-150 group-hover/thumbnail:opacity-100 group-hover/thumbnail:pointer-events-auto"
               >
@@ -137,7 +143,7 @@
       </div>
 
       <div class="shrink-0 border-t border-base-content/5 px-1 py-3">
-        <button type="button" class="flex w-full items-center gap-1 text-base-content/70 hover:text-base-content" :aria-expanded="showOrganizationPanel" @click="toggleOrganization">
+        <button type="button" class="flex w-full items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" :aria-expanded="showOrganizationPanel" @click="toggleOrganization">
           <IconRight class="w-3 h-3 transition-transform duration-200" :class="{ 'rotate-90': showOrganizationPanel }" />
           <span class="font-bold uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.organization') }}</span>
         </button>
@@ -425,7 +431,7 @@
 
       <SmoothHeight>
       <div v-if="hasLocationInfo" class="border-t border-base-content/5 px-1 py-3">
-        <button type="button" class="flex w-full items-center gap-1 text-base-content/70 hover:text-base-content" :aria-expanded="showMapPanel" @click="toggleMapPanel">
+        <button type="button" class="flex w-full items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" :aria-expanded="showMapPanel" @click="toggleMapPanel">
           <IconRight class="w-3 h-3 transition-transform duration-200" :class="{ 'rotate-90': showMapPanel }" />
           <span class="font-bold uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.geo_location') }}</span>
         </button>
@@ -462,7 +468,7 @@
 
       <SmoothHeight>
       <div v-if="hasSourceMetadata" class="border-t border-base-content/5 px-1 py-3">
-        <button type="button" class="flex w-full items-center gap-1 text-base-content/70 hover:text-base-content" :aria-expanded="showSourceMetadataPanel" @click="toggleSourceMetadata">
+        <button type="button" class="flex w-full items-center gap-1 cursor-pointer text-base-content/70 hover:text-base-content" :aria-expanded="showSourceMetadataPanel" @click="toggleSourceMetadata">
           <IconRight class="w-3 h-3 transition-transform duration-200" :class="{ 'rotate-90': showSourceMetadataPanel }" />
           <span class="font-bold uppercase text-xs tracking-wide text-base-content/30">{{ $t('file_info.source_metadata') }}</span>
         </button>
@@ -548,6 +554,7 @@ import MapView from '@/components/MapView.vue';
 const props = defineProps({
   navigatorViewport: { type: Object, default: null },
   refreshFile: { type: Function, default: null },
+  changeThumbnail: { type: Function, default: null },
   fileInfo: {
     type: Object,
     required: false
@@ -751,6 +758,20 @@ async function refreshInfo() {
     if (activeInfoKey.value === key) toast.error(t('tooltip.update_image.failed'));
   } finally {
     if (refreshingFile.value === key) refreshingFile.value = null;
+  }
+}
+const changingThumbnail = ref(false);
+const canChangeThumbnail = computed(() => Number(props.fileInfo?.duration || 0) > 10);
+async function changePreviewThumbnail() {
+  if (!canChangeThumbnail.value || changingThumbnail.value || !props.changeThumbnail || !props.fileInfo) return;
+  changingThumbnail.value = true;
+  try {
+    await props.changeThumbnail(props.fileInfo);
+  } catch (error) {
+    console.error('Failed to change video thumbnail:', error);
+    toast.error(t('tooltip.update_image.failed'));
+  } finally {
+    changingThumbnail.value = false;
   }
 }
 onBeforeUnmount(() => clearTimeout(loadingTimer));

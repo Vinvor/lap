@@ -515,6 +515,7 @@
             ref="fileInfoRef"
             :fileInfo="fileList[selectedItemIndex]"
             :refresh-file="refreshFileInfoFromPanel"
+            :change-thumbnail="changeVideoThumbnailFromPanel"
             :navigator-viewport="infoNavigatorViewport"
             @navigator-visible="infoNavigatorVisible = $event"
             @navigator-navigate="navigateInfoPreview"
@@ -782,7 +783,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          copyImages, renameFile, moveFile, moveFileOutsideLibrary, copyFile, withFileTransferBatch, deleteFile, deleteFilePermanently, batchDeleteFiles, editFileComment, getFileThumb, getFileThumbs, getFileInfo,
          setFileRotate, setFileFavorite, setFileRating, setFileCullingFlag, batchUpdateFileMetadata, getTagsForFile, getTagGroupName, searchSimilarImages, generateEmbedding,
          revealPath, getTagName, indexAlbum, listenIndexProgress, listenIndexFinished, setAlbumCover, setDesktopWallpaper,
-         updateFileInfo, refreshFileInfo, getSupportedFormatExtensions, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
+         updateFileInfo, refreshFileInfo, changeVideoThumbnail, getSupportedFormatExtensions, importFile, importUrl, importFileBytes, getDragPayload, importClipboard, addFileToDb, checkFileExists, checkFileAccessibility, cancelIndexing as cancelIndexingApi, selectFolder, getFacesForFile, listenFaceIndexProgress,
          openFilesWithApp, getAppConfig, getIndexRecoveryInfo, clearIndexRecoveryInfo, setLastSelectedItemIndex,
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
@@ -9438,6 +9439,17 @@ async function refreshGroupedRowsAfterDelete(fileIds: number[]) {
   pendingRestoreScrollTop.value = gridViewRef.value?.getScrollTop() ?? null;
   await initializeGroupedFileList(currentContentRequestId);
 }
+
+const changeVideoThumbnailFromPanel = async (file: any) => {
+  if (!await requireOriginalFiles([file])) return;
+  const libraryId = libConfig._libraryId;
+  const thumb = await changeVideoThumbnail(libraryId, file.id, getNextVideoThumbnailRefreshPercent(file));
+  if (libraryId !== libConfig._libraryId) return;
+  if (!thumb || thumb.error_code !== 0) throw new Error('Thumbnail generation failed');
+  clearCachedThumbnailDataUrl(file.id, config.settings.thumbnailSize);
+  const target = fileList.value.find(item => item.id === file.id) || file;
+  target.thumbnail = getThumbnailDataUrl(thumb, thumbnailPlaceholder, true, config.settings.thumbnailSize, file.file_path, Number(file.modified_at || 0), !file.cloud_only);
+};
 
 // Refresh panel data without reloading whichever image is selected after the await.
 const refreshFileInfoFromPanel = async (file: any) => {

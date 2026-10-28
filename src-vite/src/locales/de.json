@@ -1162,6 +1162,7 @@
     "title": "Datei-Info",
     "preview": "Vorschau",
     "thumbnail": "Miniatur",
+    "change_thumbnail": "Vorschaubild ändern",
     "histogram": "Histogramm",
     "preview_size": "Miniaturgröße",
     "general": "Allgemein",

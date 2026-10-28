@@ -1162,6 +1162,7 @@
     "title": "Adatok",
     "preview": "Előnézet",
     "thumbnail": "Bélyegkép",
+    "change_thumbnail": "Bélyegkép módosítása",
     "histogram": "Hisztogram",
     "preview_size": "Bélyegkép mérete",
     "general": "Általános",

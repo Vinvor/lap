@@ -3076,6 +3076,29 @@ pub async fn check_selected_file_info(
     .map_err(|e| format!("File check task failed: {e}"))?
 }
 
+/// Explicitly replace a video thumbnail without refreshing metadata.
+#[tauri::command]
+pub async fn change_video_thumbnail(
+    library_id: String,
+    file_id: i64,
+    thumbnail_size: u32,
+    seek_percent: u8,
+) -> Result<Option<AThumb>, String> {
+    let _permit = crate::t_sqlite::thumb_background_generation_permits()
+        .acquire_owned().await.map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        with_current_library(&library_id, || {
+            let file = AFile::get_file_info(file_id)?.ok_or("File not found")?;
+            if file.file_type != Some(2) { return Err("Not a video".into()); }
+            AThumb::get_or_create_thumb(
+                file_id, file.file_path.as_deref().unwrap_or_default(), 2,
+                file.e_orientation.unwrap_or(1) as i32, thumbnail_size.clamp(64, 2048),
+                RawDisplayOptions::default(), true, file.duration.map(|d| d as u64), Some(seek_percent),
+            )
+        })
+    }).await.map_err(|e| format!("Thumbnail task failed: {e}"))?
+}
+
 /// Repair only stale or missing metadata/cache entries in the selected file.
 #[tauri::command]
 pub async fn refresh_selected_file_info(
