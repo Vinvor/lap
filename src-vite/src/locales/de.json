@@ -1011,7 +1011,6 @@
       "error": "Dateiauswahl fehlgeschlagen."
     },
     "file_refresh": {
-      "rebuild_previews": "Vorschauen für alle ausgewählten Dateien neu erstellen",
       "skipped": "Übersprungen: {count}",
       "checking": "Wird geprüft…",
       "pending": "{count} Dateien müssen aktualisiert werden",

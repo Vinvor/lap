@@ -1011,7 +1011,6 @@
       "error": "Falha ao selecionar arquivo."
     },
     "file_refresh": {
-      "rebuild_previews": "Reconstruir as pré-visualizações de todos os ficheiros selecionados",
       "skipped": "Ignorados: {count}",
       "checking": "A verificar…",
       "pending": "{count} ficheiros precisam de atualização",

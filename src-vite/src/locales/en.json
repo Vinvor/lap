@@ -1011,7 +1011,6 @@
       "error": "Failed to select file."
     },
     "file_refresh": {
-      "rebuild_previews": "Rebuild previews for all selected files",
       "skipped": "Skipped: {count}",
       "checking": "Checking…",
       "pending": "{count} files need updating",

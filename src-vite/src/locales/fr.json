@@ -1011,7 +1011,6 @@
       "error": "Échec sélection fichier."
     },
     "file_refresh": {
-      "rebuild_previews": "Reconstruire les aperçus de tous les fichiers sélectionnés",
       "skipped": "Ignorés : {count}",
       "checking": "Vérification…",
       "pending": "{count} fichiers à mettre à jour",

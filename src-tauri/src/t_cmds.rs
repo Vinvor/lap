@@ -85,10 +85,6 @@ struct ImportOrganizeFinished {
 #[serde(rename_all = "camelCase")]
 pub struct ThumbRequest {
     pub file_id: i64,
-    pub file_path: Option<String>,
-    pub file_type: Option<i64>,
-    pub orientation: Option<i32>,
-    pub album_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2686,9 +2682,6 @@ pub async fn get_file_thumb(
     if let Some(thumb) = AThumb::get_thumb_if_available(
         file_id,
         file_path,
-        thumbnail_size,
-        orientation,
-        raw_display_options,
         force_regenerate,
         t_utils::album_accessible(album_id),
     )
@@ -2738,9 +2731,6 @@ pub async fn get_file_thumb_by_id(
     if let Some(thumb) = AThumb::get_thumb_if_available(
         file_id,
         &file_path,
-        thumbnail_size,
-        orientation,
-        raw_display_options,
         force_regenerate,
         file.album_accessible,
     )
@@ -2773,106 +2763,73 @@ pub async fn get_file_thumbs(
     thumbnail_size: u32,
     raw_display_options: RawDisplayOptions,
     force_regenerate: bool,
-    trust_cached: bool,
 ) -> Result<Vec<Option<AThumb>>, String> {
-    let mut thumbs = Vec::with_capacity(files.len());
-    let file_ids: Vec<i64> = files
-        .iter()
-        .map(|request| request.file_id)
-        .filter(|file_id| *file_id > 0)
-        .collect();
-    let mut fetched_thumbs = if force_regenerate {
-        HashMap::new()
-    } else {
-        AThumb::fetch_many(&file_ids)
-            .map_err(|e| format!("Error while fetching thumbnails: {}", e))?
-    };
-
-    for request in files {
-        if request.file_id <= 0 {
-            thumbs.push(None);
-            continue;
-        }
-
-        let mut file_path = request.file_path;
-        let mut file_type = request.file_type.unwrap_or(0);
-        let mut orientation = request.orientation.unwrap_or(1);
-        let mut album_id = request.album_id.unwrap_or(0);
-
-        if file_path.is_none()
-            || request.file_type.is_none()
-            || request.orientation.is_none()
-            || album_id <= 0
-        {
-            if let Some(file) = AFile::get_file_info(request.file_id)
-                .map_err(|e| format!("Error while getting file info for thumbnail: {}", e))?
-            {
-                if file_path.is_none() {
-                    file_path = file.file_path;
+    let library = t_config::current_library_id()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        with_current_library(&library, || {
+            let ids: Vec<_> = files
+                .iter()
+                .map(|f| f.file_id)
+                .filter(|id| *id > 0)
+                .collect();
+            let mut catalog: HashMap<_, _> = AFile::get_files_by_ids(&ids)?
+                .into_iter()
+                .filter_map(|f| f.id.map(|id| (id, f)))
+                .collect();
+            let mut cached = AThumb::fetch_many(&ids)?;
+            let mut thumbs = Vec::with_capacity(files.len());
+            for request in files {
+                let Some(file) = catalog.remove(&request.file_id) else {
+                    thumbs.push(None);
+                    continue;
+                };
+                let Some(path) = file.file_path.as_deref() else {
+                    thumbs.push(None);
+                    continue;
+                };
+                let album_id = file.album_id.unwrap_or(0);
+                if !file.album_accessible {
+                    thumbs.push(cached.remove(&request.file_id));
+                    continue;
                 }
-                if request.file_type.is_none() {
-                    file_type = file.file_type.unwrap_or(0);
+                if !force_regenerate
+                    && !AThumb::auto_repair_allowed(&file, thumbnail_size, raw_display_options)
+                {
+                    thumbs.push(cached.remove(&request.file_id));
+                    continue;
                 }
-                if request.orientation.is_none() {
-                    orientation = file.e_orientation.unwrap_or(1) as i32;
+                if let Some(thumb) = cached.remove(&request.file_id) {
+                    if let Some(thumb) = AThumb::resolve_fetched_thumb_if_available(
+                        thumb,
+                        path,
+                        force_regenerate,
+                        file.album_accessible,
+                    )? {
+                        thumbs.push(Some(thumb));
+                        continue;
+                    }
                 }
-                if album_id <= 0 {
-                    album_id = file.album_id.unwrap_or(0);
+                if t_utils::content_readable(path) {
+                    AThumb::schedule_background_generation_for_library(
+                        app_handle.clone(),
+                        request.file_id,
+                        path.to_string(),
+                        file.file_type.unwrap_or(0),
+                        file.e_orientation.unwrap_or(1) as i32,
+                        thumbnail_size,
+                        raw_display_options,
+                        album_id,
+                        force_regenerate,
+                        None,
+                    );
                 }
+                thumbs.push(None);
             }
-        }
-
-        let Some(file_path) = file_path else {
-            thumbs.push(None);
-            continue;
-        };
-
-        // Offline browsing, including a forced refresh, only reads local cache.
-        if !t_utils::album_accessible(album_id) {
-            let thumb = match fetched_thumbs.remove(&request.file_id) {
-                Some(thumb) => Some(thumb),
-                None => AThumb::fetch(request.file_id)
-                    .map_err(|e| format!("Error while fetching offline thumbnail: {}", e))?,
-            };
-            thumbs.push(thumb);
-            continue;
-        }
-
-        if let Some(fetched_thumb) = fetched_thumbs.remove(&request.file_id) {
-            if let Some(thumb) = AThumb::resolve_fetched_thumb_if_available(
-                fetched_thumb,
-                &file_path,
-                thumbnail_size,
-                orientation,
-                raw_display_options,
-                force_regenerate,
-                trust_cached,
-                t_utils::album_accessible(album_id),
-            )
-            .map_err(|e| format!("Error while getting thumbnail: {}", e))?
-            {
-                thumbs.push(Some(thumb));
-                continue;
-            }
-        }
-
-        AThumb::schedule_background_generation_for_library(
-            app_handle.clone(),
-            request.file_id,
-            file_path,
-            file_type,
-            orientation,
-            thumbnail_size,
-            raw_display_options,
-            album_id,
-            force_regenerate,
-            None,
-        );
-
-        thumbs.push(None);
-    }
-
-    Ok(thumbs)
+            Ok(thumbs)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// get a file's info
@@ -3075,48 +3032,14 @@ pub struct FileRefreshResult {
     error: Option<String>,
 }
 
-/// Re-read a file's metadata. Without `force`, an unchanged online-only file is left unread.
+/// Refresh metadata without reopening unchanged originals.
 fn refresh_file(file_id: i64, force: bool) -> Result<Option<FileRefreshResult>, String> {
-    let old = AFile::get_file_info(file_id)?.ok_or("File not found")?;
-    let path = old.file_path.as_deref().ok_or("File path missing")?;
-    // Reading a cloud-only file downloads it; if its size and date still
-    // match the stored info, there is nothing new to read.
-    if !force && fs::metadata(path).is_ok_and(|m| {
-        t_utils::is_cloud_only(&m)
-            && m.len() as i64 == old.size
-            && t_utils::systemtime_to_timestamp(m.modified().ok()) == old.modified_at
-    }) {
-        let checked_at = chrono::Utc::now().timestamp_millis();
-        let import_error = if crate::t_xmp::is_xmp_import_enabled() {
-            crate::t_xmp::import_xmp_for_file_with_mode(file_id, path, crate::t_xmp::XmpImportMode::RefreshNonDestructive)
-                .err().map(|error| format!("XMP import failed: {error}"))
-        } else { None };
-        // Keep the original's pending state. Report sidecar errors, but advance
-        // the check time so an unchanged broken sidecar is not offered forever.
-        AFile::update_column(file_id, "last_scan_time", &checked_at)?;
-        let file = AFile::get_file_info(file_id)?.unwrap_or(old);
-        return Ok(Some(FileRefreshResult { file, size_delta: 0, skipped: true, warning: import_error, ..Default::default() }));
-    }
-    let (updated, import_error) = AFile::update_file_info_with_xmp_error(
-        file_id, path, chrono::Utc::now().timestamp_millis(),
-    )?;
-    if let Some(ref file) = updated {
-        let content_changed = old.cloud_only || old.modified_at != file.modified_at || old.size != file.size;
-        if content_changed || old.width != file.width || old.height != file.height
-            || old.e_orientation != file.e_orientation {
-            AThumb::delete(file_id)?;
-        }
-        if content_changed {
-            AFile::update_column(file_id, "embeds", &Option::<Vec<u8>>::None)?;
-        }
-    }
-    AFile::update_column(file_id, "cloud_only", &false)?;
-    if import_error.is_none() { AFile::update_column(file_id, "metadata_pending", &false)?; }
-    Ok(AFile::get_file_info(file_id)?.map(|file| FileRefreshResult {
-        size_delta: file.size - old.size,
-        file,
-        skipped: false,
-        warning: import_error,
+    let refresh = AFile::refresh_metadata(file_id, force, true)?;
+    Ok(Some(FileRefreshResult {
+        file: refresh.file,
+        size_delta: refresh.size_delta,
+        skipped: refresh.skipped,
+        warning: refresh.warning,
         ..Default::default()
     }))
 }
@@ -3134,38 +3057,57 @@ pub fn end_file_refresh_batch(batch_id: u64) {
 }
 
 #[tauri::command]
-pub async fn check_selected_file_info(library_id: String, file_id: i64, batch_id: u64) -> Result<bool, String> {
+pub async fn check_selected_file_info(
+    library_id: String,
+    file_id: i64,
+    batch_id: u64,
+    thumbnail_size: u32,
+    raw_display_options: RawDisplayOptions,
+) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
-        if t_config::current_library_id()? != library_id { return Err("Library changed".into()); }
-        let _index = crate::t_xmp::refresh_index_scope(Some(batch_id), &library_id)?;
-        AFile::needs_file_info_refresh(file_id)
-    }).await.map_err(|e| format!("File check task failed: {e}"))?
+        with_current_library(&library_id, || {
+            let _index = crate::t_xmp::refresh_index_scope(Some(batch_id), &library_id)?;
+            let file = AFile::get_file_info(file_id)?.ok_or("File not found")?;
+            Ok(file.metadata_needs_refresh()?
+                || AThumb::needs_refresh(&file, thumbnail_size, raw_display_options)?)
+        })
+    })
+    .await
+    .map_err(|e| format!("File check task failed: {e}"))?
 }
 
-/// Force a selected file refresh without accepting a stale frontend file path.
+/// Repair only stale or missing metadata/cache entries in the selected file.
 #[tauri::command]
-pub async fn refresh_selected_file_info(library_id: String, file_id: i64, batch_id: Option<u64>, rebuild_previews: Option<bool>) -> Result<Option<FileRefreshResult>, String> {
+pub async fn refresh_selected_file_info(
+    library_id: String,
+    file_id: i64,
+    batch_id: Option<u64>,
+    thumbnail_size: Option<u32>,
+    raw_display_options: Option<RawDisplayOptions>,
+) -> Result<Option<FileRefreshResult>, String> {
+    let _permit = crate::t_sqlite::thumb_background_generation_permits()
+        .acquire_owned()
+        .await
+        .map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
-        let _guard = FILE_REFRESH_LIBRARY_LOCK.read().map_err(|e| e.to_string())?;
-        if t_config::current_library_id()? != library_id {
-            return Err("Library changed".to_string());
-        }
-        let _index = crate::t_xmp::refresh_index_scope(batch_id, &library_id)?;
-        let mut result = refresh_file(file_id, false)?;
-        if rebuild_previews.unwrap_or(false)
-            && let Some(ref mut result) = result
-            && !result.skipped {
-            match AThumb::delete(file_id) {
-                Ok(_) => result.file.has_thumbnail = Some(false),
-                Err(error) => result.error = Some(match result.error.take() {
-                    Some(previous) => format!("{previous}; Preview rebuild failed: {error}"),
-                    None => format!("Preview rebuild failed: {error}"),
-                }),
-            }
-        }
-        Ok(result)
-    }).await.map_err(|e| format!("File refresh task failed: {e}"))?
+        with_current_library(&library_id, || {
+            let _index = crate::t_xmp::refresh_index_scope(batch_id, &library_id)?;
+            let size = thumbnail_size.unwrap_or(512).clamp(64, 2048);
+            let options = raw_display_options.unwrap_or_default();
+            let (refresh, error) =
+                AThumb::refresh_file_and_thumbnail(file_id, size, options, true)?;
+            Ok(Some(FileRefreshResult {
+                file: refresh.file,
+                size_delta: refresh.size_delta,
+                skipped: refresh.skipped,
+                warning: refresh.warning,
+                error,
+                ..Default::default()
+            }))
+        })
+    })
+    .await
+    .map_err(|e| format!("File refresh task failed: {e}"))?
 }
 
 /// "Download, index, then free up space": index an online-only file in full,

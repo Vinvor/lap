@@ -1011,7 +1011,6 @@
       "error": "Nem sikerült kiválasztani a fájlt."
     },
     "file_refresh": {
-      "rebuild_previews": "Az összes kijelölt fájl előnézetének újraépítése",
       "skipped": "Kihagyva: {count}",
       "checking": "Ellenőrzés…",
       "pending": "{count} fájl frissítést igényel",

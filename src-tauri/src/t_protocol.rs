@@ -130,67 +130,58 @@ pub fn register_protocols(builder: Builder<Wry>) -> Builder<Wry> {
             }
 
             let options = raw_display_options(request.uri().query());
-            let thumbnail_size = request.uri().query().unwrap_or_default().split('&')
-                .find_map(|part| part.strip_prefix("size=").and_then(|value| value.parse::<u32>().ok()))
-                .unwrap_or(512).clamp(64, 2048);
-            let app_handle = _ctx.app_handle().clone();
+            let query = request.uri().query().unwrap_or_default();
+            let thumbnail_size = query.split('&').find_map(|p| p.strip_prefix("size=").and_then(|v| v.parse::<u32>().ok()))
+                .unwrap_or(512).clamp(64,2048);
+            let repair = query.split('&').any(|p| p == "repair=true");
+            let app = _ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(Some(file)) = t_sqlite::AFile::get_file_info(file_id) {
-                    if file.file_type == Some(3) {
-                        let permit = match t_sqlite::thumb_background_generation_permits().acquire_owned().await {
-                            Ok(permit) => permit,
-                            Err(_) => { responder.respond(text_response(http::StatusCode::SERVICE_UNAVAILABLE, "thumbnail queue closed")); return; }
-                        };
-                        let result = tauri::async_runtime::spawn_blocking(move || {
-                            let _permit = permit;
-                            // The queue can outlive a library switch. Re-read the
-                            // file only after validating and locking its library.
-                            crate::t_cmds::with_current_library(&library_id, || {
-                                let file = t_sqlite::AFile::get_file_info(file_id)?
-                                    .ok_or_else(|| "File not found".to_string())?;
-                                if file.file_type != Some(3) { return Err("File type changed".to_string()); }
-                                t_sqlite::AThumb::get_or_create_thumb(file_id, file.file_path.as_deref().unwrap_or_default(),
-                                    3, file.e_orientation.unwrap_or(1) as i32, thumbnail_size, options, false, None, None)
-                            })
-                        }).await;
-                        let response = match result {
-                            Ok(Ok(Some(thumb))) => match thumb.thumb_data {
-                                Some(data) => raw_image_response(data),
-                                None => text_response(http::StatusCode::NOT_FOUND, "thumbnail not found"),
-                            },
-                            _ => text_response(http::StatusCode::NOT_FOUND, "thumbnail not found"),
-                        };
-                        responder.respond(response);
-                        return;
-                    }
-                }
-                let response = match t_sqlite::AThumb::fetch_raw_for_library(file_id, &library_id) {
-                    Ok(Some(data)) => image_response(data),
-                    _ => {
-                        if let Ok(Some(file)) = t_sqlite::AFile::get_file_info(file_id) {
-                            if let Some(file_path) = file.file_path.clone() {
-                                let file_type = file.file_type.unwrap_or(0);
-                                let orientation = file.e_orientation.unwrap_or(1) as i32;
-                                let album_id = file.album_id.unwrap_or(0);
-                                let thumbnail_size = 200;
-                                t_sqlite::AThumb::schedule_background_generation_for_library(
-                                    app_handle,
-                                    file_id,
-                                    file_path,
-                                    file_type,
-                                    orientation,
-                                    thumbnail_size,
-                                    options,
-                                    album_id,
-                                    false,
-                                    None,
-                                );
+                if !repair {
+                    let lookup_library = library_id.clone();
+                    let cached = tauri::async_runtime::spawn_blocking(move || {
+                        crate::t_cmds::with_current_library(&lookup_library, || {
+                            let file = t_sqlite::AFile::get_file_info(file_id)?.ok_or("File not found")?;
+                            let path = file.file_path.as_deref().unwrap_or_default();
+                            if let Some(thumb) = t_sqlite::AThumb::get_thumb_if_available(file_id, path, false, file.album_accessible)? {
+                                if let Some(data) = thumb.thumb_data { return Ok(Some((data, file.file_type == Some(3)))); }
+                                if thumb.error_code == 2 { return t_sqlite::AThumb::fetch_raw_for_library(file_id, &lookup_library)
+                                    .map(|data| data.map(|data| (data, false))); }
                             }
-                        }
-                        text_response(http::StatusCode::NOT_FOUND, "thumbnail not found")
-                    }
+                            Ok(None)
+                        })
+                    }).await;
+                    if let Ok(Ok(Some((data, raw)))) = cached { responder.respond(if raw { raw_image_response(data) } else { image_response(data) }); return; }
+                }
+                let permits = t_sqlite::thumb_background_generation_permits();
+                let Ok(permit) = permits.acquire_owned().await else {
+                    responder.respond(text_response(http::StatusCode::SERVICE_UNAVAILABLE, "thumbnail queue closed")); return;
                 };
-                responder.respond(response);
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::t_cmds::with_current_library(&library_id, || {
+                        let file = t_sqlite::AFile::get_file_info(file_id)?.ok_or("File not found")?;
+                        let previous = t_sqlite::AThumb::fetch_record(file_id)?.and_then(|(thumb, _)| thumb.id);
+                        let thumb = t_sqlite::AThumb::get_or_create_thumb(file_id, file.file_path.as_deref().unwrap_or_default(),
+                            file.file_type.unwrap_or(0), file.e_orientation.unwrap_or(1) as i32,
+                            thumbnail_size, options, repair && t_sqlite::AThumb::auto_repair_allowed(&file, thumbnail_size, options), file.duration.map(|d| d as u64), None)?;
+                        if repair && thumb.as_ref().is_some_and(|thumb| ((thumb.error_code == 0 && thumb.thumb_data.is_some()) || thumb.error_code == 2)
+                            && previous != thumb.id) {
+                            use tauri::Emitter;
+                            let _ = app.emit("thumbnail_ready", serde_json::json!({ "library_id": library_id, "album_id": file.album_id,
+                                "file_ids": [file_id], "invalidate": true, "metadata_changed": false }));
+                        }
+                        if let Some(thumb) = thumb {
+                            if let Some(data) = thumb.thumb_data { return Ok(Some((data, file.file_type == Some(3)))); }
+                            if thumb.error_code == 2 { return t_sqlite::AThumb::fetch_raw_for_library(file_id, &library_id)
+                                .map(|data| data.map(|data| (data, false))); }
+                        }
+                        Ok(None)
+                    })
+                }).await;
+                responder.respond(match result {
+                    Ok(Ok(Some((data, raw)))) => if raw { raw_image_response(data) } else { image_response(data) },
+                    _ => text_response(http::StatusCode::NOT_FOUND, "thumbnail not found"),
+                });
             });
         })
         .register_asynchronous_uri_scheme_protocol("preview", |_ctx, request, responder| {

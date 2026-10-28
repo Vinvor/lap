@@ -1011,7 +1011,6 @@
       "error": "Nie udało się wybrać pliku."
     },
     "file_refresh": {
-      "rebuild_previews": "Odbuduj podglądy wszystkich wybranych plików",
       "skipped": "Pominięto: {count}",
       "checking": "Sprawdzanie…",
       "pending": "Pliki wymagające aktualizacji: {count}",

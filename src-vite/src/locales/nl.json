@@ -1011,7 +1011,6 @@
       "error": "Kan bestand niet kiezen."
     },
     "file_refresh": {
-      "rebuild_previews": "Voorbeelden van alle geselecteerde bestanden opnieuw maken",
       "skipped": "Overgeslagen: {count}",
       "checking": "Controleren…",
       "pending": "{count} bestanden moeten worden bijgewerkt",

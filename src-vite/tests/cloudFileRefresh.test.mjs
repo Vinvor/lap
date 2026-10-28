@@ -39,7 +39,7 @@ function fixture(responses, options = {}) {
     window: { addEventListener() {}, removeEventListener() {} }, console: { error() {} },
   };
   const state = new Function(...Object.keys(deps), body +
-    '; return { processed, succeeded, skipped, failed, warned, releaseRequested, keptLocal, lastError, lastWarning, running, cancelled, ready, pendingIds, rebuildPreviews, update: () => runRefresh(filesToUpdate()) };')(...Object.values(deps));
+    '; return { processed, succeeded, skipped, failed, warned, releaseRequested, keptLocal, lastError, lastWarning, running, cancelled, ready, pendingIds, filesToUpdate, update: () => runRefresh(filesToUpdate()) };')(...Object.values(deps));
   return { state, refreshed, calls, run: () => mounted() };
 }
 const result = (id, extra = {}) => ({ file: { id, cloud_only: false, metadata_pending: false },
@@ -157,15 +157,15 @@ test('XMP failure keeps extracted metadata and pending state as a warning', asyn
   assert.equal(f.state.lastError.value, '');
 });
 
-test('preview repair refreshes the full selection even when timestamps are unchanged', async () => {
-  const f = fixture([result(1), result(2)], { freeSpace: false, checks: [false, false] });
+test('files requiring only preview repair are checked and refreshed without a manual option', async () => {
+  const f = fixture([result(1), result(2)], { freeSpace: false, checks: [false, true] });
   await f.run();
-  assert.deepEqual(f.state.pendingIds.value, []);
-  f.state.rebuildPreviews.value = true;
+  assert.deepEqual(f.state.pendingIds.value, [2]);
   await f.state.update();
   const updates = f.calls.filter(call => call.command === 'refresh_selected_file_info');
-  assert.deepEqual(updates.map(call => call.args.fileId), [1, 2]);
-  assert.ok(updates.every(call => call.args.rebuildPreviews === true));
+  assert.deepEqual(updates.map(call => call.args.fileId), [2]);
+  assert.ok(updates.every(call => call.args.thumbnailSize === 512 && !('rebuildPreviews' in call.args)));
+  assert.ok(f.calls.filter(call => call.command === 'check_selected_file_info').every(call => call.args.thumbnailSize === 512));
 });
 
 test('cloud-only XMP warnings are reported while retaining skipped metadata and pending state', async () => {
@@ -202,7 +202,6 @@ test('preview failure takes precedence in counts while retaining an XMP warning'
   const partial = result(1, { warning: 'XMP import failed: Malformed XML', error: 'Preview rebuild failed: Permission denied' });
   const f = fixture([partial], { freeSpace: false });
   await f.run();
-  f.state.rebuildPreviews.value = true;
   await f.state.update();
   assert.equal(f.state.processed.value, 1);
   assert.equal(f.state.failed.value, 1);
@@ -229,7 +228,7 @@ test('single-file panel refresh preserves metadata and distinguishes warnings fr
     const messages = [];
     const deps = {
       libConfig: { _libraryId: 'test' }, refreshFileInfo: async () => updated,
-      fileInfoRevision: ref(0), tauriEmit: async () => {},
+      fileInfoRevision: ref(0), tauriEmit: async () => {}, getFileListThumb: async () => {},
       toast: { warning: text => messages.push(['warning', text]), error: text => messages.push(['error', text]) },
     };
     const refresh = contentRefresh('const refreshFileInfoFromPanel = async', '// update the file info from the file;', deps, 'refreshFileInfoFromPanel');
@@ -246,10 +245,11 @@ test('single-file menu refresh reports warnings and failures for both local and 
       const updated = result(1, { skipped, ...extra });
       const file = { id: 1, file_path: '/photo.jpg' };
       const messages = [];
+      const thumbnailLoads = [];
       const deps = {
         requireOriginalFiles: async () => true, refreshFileInfo: async () => updated,
-        libConfig: { _libraryId: 'test' }, fileInfoRevision: ref(0), tauriEmit: async () => {},
-        updateThumbForFile: async () => {}, updateSelectedImage: async () => {}, selectedItemIndex: ref(0),
+        libConfig: { _libraryId: 'test' }, fileInfoRevision: ref(0), tauriEmit: async () => {}, getFileListThumb: async (...args) => thumbnailLoads.push(args),
+        updateThumbForFile: async () => { throw new Error("Refresh must not force a second generation"); }, updateSelectedImage: async () => {}, selectedItemIndex: ref(0),
         nextTick: async () => {}, uiStore: { clearActiveAdjustments() {} },
         localeMsg: ref({ tooltip: { update_image: { success: 'Updated', failed: 'Failed' } } }),
         toast: { warning: text => messages.push(['warning', text]), error: text => messages.push(['error', text]), success: text => messages.push(['success', text]) },
@@ -257,6 +257,8 @@ test('single-file menu refresh reports warnings and failures for both local and 
       const refresh = contentRefresh('const updateFile = async', '// force-update the thumbnail for the file', deps, 'updateFile');
       await refresh(file, true);
       assert.equal(file.id, updated.file.id);
+      assert.equal(thumbnailLoads.length, skipped ? 0 : 1);
+      if (!skipped) assert.deepEqual(thumbnailLoads[0][1], { bustCache: true, viewportBound: false });
       assert.deepEqual(messages, [[extra.error ? 'error' : 'warning', [extra.warning, extra.error].filter(Boolean).join('; ')]]);
     }
   }
@@ -266,5 +268,15 @@ test('all supported locales include the refresh warnings count with its placehol
   for (const name of ['en','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','zh-CN','zh-TW']) {
     const locale = JSON.parse(fs.readFileSync(new URL(`../src/locales/${name}.json`, import.meta.url), 'utf8'));
     assert.match(locale.msgbox.file_refresh.warnings, /\{count\}/, name);
+  }
+});
+
+
+test('manual rebuild options and unused locale keys are removed', () => {
+  assert.doesNotMatch(source, /rebuildPreviews|rebuild_previews|rebuild_pending/);
+  for (const name of ['en','de','es','fr','hu','it','ja','ko','nl','pl','pt','ru','uk','zh-CN','zh-TW']) {
+    const locale = JSON.parse(fs.readFileSync(new URL(`../src/locales/${name}.json`, import.meta.url), 'utf8'));
+    assert.equal(locale.msgbox.file_refresh.rebuild_previews, undefined, name);
+    assert.equal(locale.msgbox.file_refresh.rebuild_pending, undefined, name);
   }
 });

@@ -371,7 +371,8 @@ function handleThumbnailLoad() {
 }
 
 function retryThumbnail() {
-  const isThumbnailProtocol = thumbnailSrc.value.startsWith('thumb://localhost')
+  const isThumbnailProtocol = thumbnailSrc.value.startsWith('data:image/')
+    || thumbnailSrc.value.startsWith('thumb://localhost')
     || thumbnailSrc.value.startsWith('http://thumb.localhost')
     || thumbnailSrc.value.startsWith('https://thumb.localhost');
   if (thumbnailRetryCount > 0 || !isThumbnailProtocol) {
@@ -379,7 +380,8 @@ function retryThumbnail() {
   }
   thumbnailRetryCount++;
   isThumbnailLoaded.value = false;
-  thumbnailSrc.value = getThumbUrl(props.file.id, true, config.settings.thumbnailSize, Number(props.file.modified_at || 0));
+  const retryUrl = getThumbUrl(props.file.id, true, config.settings.thumbnailSize, Number(props.file.modified_at || 0));
+  thumbnailSrc.value = `${retryUrl}${retryUrl.includes('?') ? '&' : '?'}repair=true`;
 }
 
 // Robust ResizeObserver setup using watch to handle v-if

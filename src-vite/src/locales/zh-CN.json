@@ -1011,7 +1011,6 @@
       "error": "选择文件失败。"
     },
     "file_refresh": {
-      "rebuild_previews": "重建所有选中文件的预览",
       "skipped": "已跳过：{count}",
       "checking": "正在检查…",
       "pending": "需要更新 {count} 个文件",

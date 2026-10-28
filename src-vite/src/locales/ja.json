@@ -1011,7 +1011,6 @@
       "error": "ファイル選択に失敗しました。"
     },
     "file_refresh": {
-      "rebuild_previews": "選択したすべてのファイルのプレビューを再生成",
       "skipped": "スキップ: {count}",
       "checking": "確認中…",
       "pending": "更新が必要なファイル: {count}",

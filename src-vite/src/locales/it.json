@@ -1011,7 +1011,6 @@
       "error": "Impossibile selezionare il file."
     },
     "file_refresh": {
-      "rebuild_previews": "Rigenera le anteprime di tutti i file selezionati",
       "skipped": "Ignorati: {count}",
       "checking": "Verifica…",
       "pending": "{count} file da aggiornare",

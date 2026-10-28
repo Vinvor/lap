@@ -3559,6 +3559,7 @@ struct FinishedPayload {
 
 #[derive(serde::Serialize, Clone)]
 struct ThumbnailReadyPayload {
+    library_id: String,
     album_id: i64,
     file_ids: Vec<i64>,
     invalidate: bool,
@@ -3677,14 +3678,13 @@ pub fn clear_index_trace() {
 
 #[derive(Clone)]
 struct ThumbnailTask {
+    library_id: String,
     file_id: i64,
     file_path: String,
     file_type: i64,
-    orientation: i32,
     thumbnail_size: u32,
     prefer_embedded_raw_thumbnail: RawDisplayOptions,
     file_size: u64,
-    duration: Option<u64>,
     is_heavy: bool,
     processed_already_ready: bool,
     force_regenerate: bool,
@@ -3915,12 +3915,9 @@ fn index_single_file(
                     }
                     if let Some(file_id) = file.id {
                         let has_thumbnail = file.has_thumbnail.unwrap_or(false);
-                        let needs_thumbnail_regeneration = has_thumbnail
-                            && crate::t_sqlite::AThumb::needs_thumbnail_regeneration(
-                                file_id,
-                                thumbnail_size,
-                                prefer_embedded_raw_thumbnail,
-                            );
+                        let needs_thumbnail_regeneration = crate::t_sqlite::AThumb::needs_refresh(
+                            &file, thumbnail_size, prefer_embedded_raw_thumbnail,
+                        ).unwrap_or(true);
                         let thumbnail_ready = has_thumbnail && !needs_thumbnail_regeneration;
                         let has_embedding = file.has_embedding.unwrap_or(false);
                         let processed_immediately = thumbnail_ready;
@@ -3938,14 +3935,13 @@ fn index_single_file(
                             None
                         } else {
                             Some(ThumbnailTask {
+                                library_id: crate::t_config::current_library_id().unwrap_or_default(),
                                 file_id,
                                 file_path: path_str.to_string(),
                                 file_type: ftype,
-                                orientation: file.e_orientation.unwrap_or(1) as i32,
                                 thumbnail_size,
                                 prefer_embedded_raw_thumbnail,
                                 file_size: file.size.max(0) as u64,
-                                duration: file.duration.map(|d| d as u64),
                                 is_heavy: should_use_heavy_lane(
                                     ftype,
                                     path_str,
@@ -4004,27 +4000,18 @@ async fn process_thumbnail_task(
         .await
         .map_err(|e| format!("Failed to acquire thumbnail permit: {}", e))?;
 
+    let _global_thumb_permit = crate::t_sqlite::thumb_background_generation_permits().acquire_owned().await
+        .map_err(|e| e.to_string())?;
     let task_for_thumb = task.clone();
     let thumb_ok = tauri::async_runtime::spawn_blocking(move || {
-        match crate::t_sqlite::AThumb::get_or_create_thumb(
-            task_for_thumb.file_id,
-            &task_for_thumb.file_path,
-            task_for_thumb.file_type,
-            task_for_thumb.orientation,
-            task_for_thumb.thumbnail_size,
-            task_for_thumb.prefer_embedded_raw_thumbnail,
-            task_for_thumb.force_regenerate,
-            task_for_thumb.duration,
-            None,
-        ) {
-            Ok(Some(thumb)) if thumb.error_code == 0 => true,
-            Ok(Some(_)) => false,
-            Ok(None) => false,
-            Err(e) => {
-                eprintln!(
-                    "Failed to generate thumb for {}: {}",
-                    task_for_thumb.file_path, e
-                );
+        let generated = crate::t_cmds::with_current_library(&task_for_thumb.library_id, || {
+            crate::t_sqlite::AThumb::refresh_file_and_thumbnail(task_for_thumb.file_id,
+                task_for_thumb.thumbnail_size, task_for_thumb.prefer_embedded_raw_thumbnail, false)
+        });
+        match generated {
+            Ok((refresh, None)) => !refresh.skipped,
+            Ok((_, Some(error))) | Err(error) => {
+                eprintln!("Failed to generate thumb for {}: {error}", task_for_thumb.file_path);
                 false
             }
         }
@@ -4032,6 +4019,8 @@ async fn process_thumbnail_task(
     .await
     .map_err(|e| format!("Thumbnail task failed: {}", e))?;
 
+    drop(_global_thumb_permit);
+    drop(_thumb_permit);
     if !thumb_ok {
         // The file record was created successfully. A preview failure must not
         // be counted as a scan failure, otherwise it overlaps with Indexed.
@@ -4041,6 +4030,7 @@ async fn process_thumbnail_task(
     let _ = app_handle.emit(
         "thumbnail_ready",
         ThumbnailReadyPayload {
+            library_id: task.library_id.clone(),
             album_id: with_progress_tracker(&tracker, |tracker| tracker.album_id),
             file_ids: vec![task.file_id],
             invalidate: task.force_regenerate,

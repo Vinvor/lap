@@ -1011,7 +1011,6 @@
       "error": "無法選擇檔案。"
     },
     "file_refresh": {
-      "rebuild_previews": "重建所有所選檔案的預覽",
       "skipped": "已跳過：{count}",
       "checking": "正在檢查…",
       "pending": "需要更新 {count} 個檔案",

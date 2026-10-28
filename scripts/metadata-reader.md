@@ -104,14 +104,14 @@ libraries build this index once during schema initialization.
 ## File-info refresh contract
 
 `check_selected_file_info` resolves each file's current catalog path under the
-library-switch lock and delegates to `AFile::needs_file_info_refresh`. The check
+library-switch lock and checks the catalog record and preview cache. The check
 uses catalog values, directory discovery and filesystem metadata only. It never
 reads original or sidecar contents, extracts metadata or downloads online-only
 files. A file needs updating when any of these conditions holds:
 
 - `metadata_pending` is set and the original is available locally.
 - `last_scan_time` is missing or nonpositive.
-- The original's modification time is later than `last_scan_time`.
+- The original's modification time differs from the successfully indexed version.
 - The original's current size differs from its catalog size.
 - Automatic XMP import is enabled and the selected sidecar's modification time is
   later than `last_scan_time`.
@@ -127,15 +127,30 @@ including cancellation and partial failures. Commands share their stage's index
 across background worker threads; expired sessions are reclaimed on subsequent
 creation. Download/index/free-space mode goes directly to a refresh session.
 
-Checking timestamps must not block preview repair. With **Rebuild previews**,
-`filesToUpdate()` selects the entire selection even if no file needs a metadata
-update. `refresh_selected_file_info` refreshes metadata and then calls
-`AThumb::delete` for results where `skipped` is false, marking the thumbnail as
-absent for later regeneration. A deletion error is retained in
-`FileRefreshResult.error` alongside the refreshed file. Unchanged online-only
-originals remain `skipped`: their contents and previews are left untouched, and
-local sidecars may still be imported when enabled. The check timestamp advances;
-the original's pending marker is retained.
+Scan and selection refresh update changed originals and repair missing/stale
+previews. Scan covers the album; selection refresh covers the selection. Missing
+previews alone do not trigger metadata extraction. Metadata backfill and
+sidecar-only imports retain valid previews; there is no separate rebuild option.
+The existence check uses database metadata and filesystem attributes without
+loading or decoding preview bytes.
+
+Browsing checks the viewport and bounded prefetch once per visit. It only fills
+missing previews (including absent/empty cache files), never refreshes file info,
+imports XMP, consumes pending work or regenerates an existing preview because its
+original changed. Cache reads always reuse existing previews without validating
+source timestamps or RAW options, and preserve invalidation markers for
+scan/refresh. Display decode failures request one repair; successful repair
+invalidates the frontend's old cache without reloading file info or the original.
+Explicit RAW display-setting changes still request their own preview replacement.
+
+Generation shares a four-task budget and per-file locking. Workers recheck after
+acquiring the lock, preserve old cache until replacement succeeds, and reject
+results if the original changes during extraction/generation. Automatic decode
+failures are suppressed for the same source/options for 30 seconds, with at most
+1024 entries; explicit scan/refresh can retry. Online-only or unavailable
+originals keep their cached previews and are never downloaded by these operations.
+Checking online-only attributes during metadata refresh advances the check
+timestamp but retains pending extraction work.
 
 Automatic XMP import failures have different reporting contracts:
 
@@ -149,8 +164,8 @@ Automatic XMP import failures have different reporting contracts:
   skipped result and advances `last_scan_time`, avoiding repeated offers for the
   same unchanged broken sidecar without downloading the original.
 
-The dialog reports XMP-only results in a separate warnings count. Preview-rebuild,
-thumbnail-generation and release errors remain failures. If both a warning and an
+The dialog reports XMP-only results in a separate warnings count.
+Thumbnail-generation and release errors remain failures. If both a warning and an
 error occur for one file, it is counted once as failed and both messages remain
 visible. Successfully updated metadata is retained in all returned results.
 Single-file refresh likewise distinguishes warning and error notifications.

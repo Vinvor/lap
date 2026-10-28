@@ -66,6 +66,81 @@ fn populate_selected_file_ids(
     Ok(())
 }
 
+struct RefreshFailure {
+    version: String,
+    message: String,
+    warning: bool,
+    at: std::time::Instant,
+}
+static REFRESH_FAILURES: OnceLock<Mutex<HashMap<String, RefreshFailure>>> = OnceLock::new();
+fn recent_refresh_failure(key: &str, version: &str) -> Option<(String, bool)> {
+    let mut failures = REFRESH_FAILURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .ok()?;
+    if let Some(failure) = failures.get(key) {
+        if failure.version == version && failure.at.elapsed() < Duration::from_secs(30) {
+            return Some((failure.message.clone(), failure.warning));
+        }
+    }
+    failures.remove(key);
+    None
+}
+fn remember_refresh_failure(key: String, version: String, message: String, warning: bool) {
+    if let Ok(mut failures) = REFRESH_FAILURES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        failures.retain(|_, f| f.at.elapsed() < Duration::from_secs(30));
+        if failures.len() >= 1024 {
+            if let Some(oldest) = failures
+                .iter()
+                .min_by_key(|(_, f)| f.at)
+                .map(|(key, _)| key.clone())
+            {
+                failures.remove(&oldest);
+            }
+        }
+        failures.insert(
+            key,
+            RefreshFailure {
+                version,
+                message,
+                warning,
+                at: std::time::Instant::now(),
+            },
+        );
+    }
+}
+fn refresh_failure_key(kind: &str, file_id: i64) -> String {
+    format!(
+        "{kind}:{}:{file_id}",
+        t_config::current_library_id().unwrap_or_default()
+    )
+}
+fn source_version(path: &str) -> String {
+    format!(
+        "{path}:{:?}",
+        fs::metadata(path)
+            .ok()
+            .map(|m| (m.len(), m.modified().ok()))
+    )
+}
+fn metadata_failure_version(path: &str) -> String {
+    let sidecar = if crate::t_xmp::is_xmp_import_enabled() {
+        crate::t_xmp::find_xmp_sidecar(Path::new(path))
+    } else {
+        None
+    };
+    format!(
+        "{}:{:?}",
+        source_version(path),
+        sidecar
+            .as_ref()
+            .map(|p| source_version(&p.to_string_lossy()))
+    )
+}
+
 struct ThumbGenerationLocks {
     active: Mutex<HashSet<String>>,
     available: Condvar,
@@ -2229,6 +2304,13 @@ pub(crate) fn cloud_scan_action(cloud_only: bool, stored: Option<&AFile>, size: 
     }
 }
 
+pub(crate) struct MetadataRefresh {
+    pub file: AFile,
+    pub size_delta: i64,
+    pub skipped: bool,
+    pub warning: Option<String>,
+}
+
 impl AFile {
     pub fn get_library_visible_counts(id: Option<&str>) -> Result<LibraryVisibleCounts, String> {
         if let Some(id) = id {
@@ -3851,6 +3933,35 @@ impl AFile {
     }
 
     pub fn add_to_db_with_raw_info(
+        folder_id: i64,
+        file_path: &str,
+        file_type: i64,
+        last_scan_time: i64,
+        raw_info: Option<t_libraw::RawInfo>,
+    ) -> Result<(Self, i32), String> {
+        let id = Self::fetch(folder_id, file_path)?.and_then(|file| file.id);
+        if let Some(id) = id {
+            AThumb::with_generation_guard(id, 0, || {
+                Self::add_to_db_with_raw_info_locked(
+                    folder_id,
+                    file_path,
+                    file_type,
+                    last_scan_time,
+                    raw_info,
+                )
+            })
+        } else {
+            Self::add_to_db_with_raw_info_locked(
+                folder_id,
+                file_path,
+                file_type,
+                last_scan_time,
+                raw_info,
+            )
+        }
+    }
+
+    fn add_to_db_with_raw_info_locked(
         folder_id: i64, file_path: &str, file_type: i64, last_scan_time: i64,
         raw_info: Option<t_libraw::RawInfo>,
     ) -> Result<(Self, i32), String> {
@@ -3870,25 +3981,9 @@ impl AFile {
             CloudScanAction::Read => {}
             CloudScanAction::ReadPending => {
                 let file_id = existing_id.ok_or("Existing DB record is missing file id")?;
-                let mut file = Self::update_file_info(file_id, file_path, last_scan_time)?
+                let file = Self::update_file_info(file_id, file_path, last_scan_time)?
                     .ok_or("File not found")?;
-                // A schema backfill alone does not invalidate thumbnails or embeddings.
-                let content_changed = existing_file.as_ref().is_some_and(|old| old.cloud_only
-                    || old.size != metadata.len() as i64
-                    || old.modified_at != t_utils::systemtime_to_timestamp(metadata.modified().ok()));
-                let thumbnail_changed = content_changed || existing_file.as_ref().is_some_and(|old|
-                    old.width != file.width || old.height != file.height || old.e_orientation != file.e_orientation);
-                if thumbnail_changed {
-                    let _ = AThumb::delete(file_id);
-                    file.has_thumbnail = Some(false);
-                }
-                if content_changed { file.has_embedding = Some(false); }
-                open_conn()?.execute(
-                    "UPDATE afiles SET embeds = CASE WHEN ?2 THEN NULL ELSE embeds END,
-                     cloud_only = 0, metadata_pending = ?3 WHERE id = ?1",
-                    params![file_id, content_changed, file.metadata_pending],
-                ).map_err(|e| e.to_string())?;
-                file.cloud_only = false;
+                // Metadata-only backfills retain valid thumbnails and embeddings.
                 return Ok((file, 2));
             }
             CloudScanAction::InsertStub => {
@@ -3931,7 +4026,7 @@ impl AFile {
                 if let Some(id) = file.id { Self::update_column(id, "cloud_only", &false)?; }
                 file.cloud_only = false;
             }
-            // check file modified time or if thumbnail is missing
+            // Check the original version independently of preview availability.
             let file_info = t_utils::FileInfo::new(file_path)?;
             // Re-read legacy ISO dates using source-aware timezone handling.
             // Probe failure must not prevent marking the existing file as seen.
@@ -3948,8 +4043,7 @@ impl AFile {
                 file.e_date_time = Some(date);
                 file.taken_date = Some(taken);
             }
-            let modified = file.modified_at != file_info.modified;
-            let missing_thumb = !file.has_thumbnail.unwrap_or(false);
+            let modified = file.modified_at != file_info.modified || file.size != file_info.file_size;
             let needs_tiff_dimension_refresh = t_libraw::is_tiff_path(file_path)
                 && file.e_orientation.unwrap_or(1) > 4
                 && t_image::get_image_dimensions(file_path).is_ok_and(|(width, height)| {
@@ -3963,31 +4057,18 @@ impl AFile {
 
             if needs_motion_photo_detection
                 && !modified
-                && !missing_thumb
                 && !needs_tiff_dimension_refresh
             {
                 Self::refresh_motion_photo_detection(&mut file, file_path, last_scan_time)?;
                 return Ok((file, 2));
             }
 
-            if modified || missing_thumb || needs_tiff_dimension_refresh {
+            if modified || needs_tiff_dimension_refresh {
                 if let Some(file_id) = file.id {
                     if let Some(mut updated_file) =
                         Self::update_file_info(file_id, file_path, last_scan_time)?
                     {
-                        // If modified, delete old thumbnail and remove embeds data
-                        if modified || missing_thumb {
-                            let _ = AThumb::delete(file_id);
-                            // remove embeds data
-                            if modified {
-                                let conn = open_conn()?;
-                                let _ = conn.execute(
-                                    "UPDATE afiles SET embeds = NULL WHERE id = ?1",
-                                    params![file_id],
-                                );
-                                updated_file.has_embedding = Some(false);
-                            }
-                        }
+                        if modified { updated_file.has_embedding = Some(false); }
                         return Ok((updated_file, 2));
                     }
                 } else {
@@ -3997,7 +4078,7 @@ impl AFile {
                     ));
                 }
             } else {
-                // Not modified and thumb exists, but we still need to update last_scan_time
+                // The original is unchanged, but we still update last_scan_time
                 // for the mark-and-sweep deletion logic.
                 if let Some(file_id) = file.id {
                     let _ = Self::update_column(file_id, "last_scan_time", &last_scan_time);
@@ -4104,6 +4185,8 @@ impl AFile {
             Err(error) => {
                 conn.execute("UPDATE afiles SET metadata_pending=1 WHERE id=?1", params![file_id])
                     .map_err(|e| e.to_string())?;
+                remember_refresh_failure(refresh_failure_key("metadata", file_id), metadata_failure_version(file_path),
+                    format!("XMP import failed: {error}"), true);
                 eprintln!("XMP import failed for {file_path}: {error}");
                 // The file is valid and must continue through scanning/import.
                 // Return the updated row so callers also see its retry marker.
@@ -4112,24 +4195,146 @@ impl AFile {
         }
     }
 
-    /// Check file timestamps and size without reading metadata or downloading originals.
-    pub fn needs_file_info_refresh(file_id: i64) -> Result<bool, String> {
+    /// Called under the file's generation guard by scan/refresh/viewport work.
+    pub(crate) fn refresh_metadata(
+        file_id: i64,
+        force_download: bool,
+        retry_failed: bool,
+    ) -> Result<MetadataRefresh, String> {
         let old = Self::get_file_info(file_id)?.ok_or("File not found")?;
         let path = old.file_path.as_deref().ok_or("File path missing")?;
+        if !old.album_accessible {
+            return Ok(MetadataRefresh {
+                file: old,
+                size_delta: 0,
+                skipped: true,
+                warning: None,
+            });
+        }
+        let info = fs::metadata(path).map_err(|e| e.to_string())?;
+        let skipped = !force_download && t_utils::is_cloud_only(&info);
+        let checked = chrono::Utc::now().timestamp_millis();
+        let _scan = crate::t_xmp::sidecar_scan(checked);
+        let version = metadata_failure_version(path);
+        let failure_key = refresh_failure_key("metadata", file_id);
+        if !retry_failed && old.metadata_pending {
+            if let Some((message, warning)) = recent_refresh_failure(&failure_key, &version) {
+                if warning {
+                    return Ok(MetadataRefresh {
+                        file: old,
+                        size_delta: 0,
+                        skipped,
+                        warning: Some(message),
+                    });
+                }
+                return Err(message);
+            }
+        }
+        if !skipped && (force_download || old.needs_extraction(&info)) {
+            let (updated, warning) =
+                match Self::update_file_info_with_xmp_error(file_id, path, checked) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let _ = Self::update_column(file_id, "metadata_pending", &true);
+                        remember_refresh_failure(failure_key, version, error.clone(), false);
+                        return Err(error);
+                    }
+                };
+            if let Some(message) = warning.as_ref() {
+                remember_refresh_failure(failure_key.clone(), version, message.clone(), true);
+            } else if let Ok(mut failures) = REFRESH_FAILURES
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+            {
+                failures.remove(&failure_key);
+            }
+            let file = updated.ok_or("File disappeared during refresh")?;
+            return Ok(MetadataRefresh {
+                size_delta: file.size - old.size,
+                file,
+                skipped: false,
+                warning,
+            });
+        }
+        let import_needed =
+            crate::t_xmp::is_xmp_import_enabled() && old.metadata_needs_refresh()?;
+        let source_changed = old.size != info.len() as i64
+            || old.modified_at != t_utils::systemtime_to_timestamp(info.modified().ok());
+        if !import_needed && (!skipped || !source_changed) {
+            return Ok(MetadataRefresh {
+                file: old,
+                size_delta: 0,
+                skipped,
+                warning: None,
+            });
+        }
+        let warning = if import_needed {
+            crate::t_xmp::import_xmp_for_file_with_mode(
+                file_id,
+                path,
+                crate::t_xmp::XmpImportMode::RefreshNonDestructive,
+            )
+            .err()
+            .map(|e| format!("XMP import failed: {e}"))
+        } else {
+            None
+        };
+        // Checking an online-only original never hydrates it or consumes pending work.
+        if skipped {
+            let changed = old.size != info.len() as i64
+                || old.modified_at != t_utils::systemtime_to_timestamp(info.modified().ok());
+            open_conn()?.execute("UPDATE afiles SET cloud_only=1,metadata_pending=CASE WHEN ?2 THEN 1 ELSE metadata_pending END,
+                size=?3,modified_at=?4 WHERE id=?1", params![file_id,changed,info.len() as i64,t_utils::systemtime_to_timestamp(info.modified().ok())])
+                .map_err(|e| e.to_string())?;
+        } else if warning.is_some() {
+            Self::update_column(file_id, "metadata_pending", &true)?;
+        }
+        if let Some(message) = warning.as_ref() {
+            remember_refresh_failure(failure_key, version, message.clone(), true);
+        }
+        Self::update_column(file_id, "last_scan_time", &checked)?;
+        let file = Self::get_file_info(file_id)?.ok_or("File disappeared during refresh")?;
+        Ok(MetadataRefresh {
+            size_delta: file.size - old.size,
+            file,
+            skipped,
+            warning,
+        })
+    }
+
+    pub(crate) fn needs_extraction(&self, info: &fs::Metadata) -> bool {
+        self.metadata_pending
+            || self.last_scan_time.unwrap_or(0) <= 0
+            || self.cloud_only
+            || self.size != info.len() as i64
+            || self.modified_at != t_utils::systemtime_to_timestamp(info.modified().ok())
+    }
+
+    /// Check timestamps and size without reading metadata or downloading originals.
+    pub(crate) fn metadata_needs_refresh(&self) -> Result<bool, String> {
+        let old = self;
+        let path = old.file_path.as_deref().ok_or("File path missing")?;
         let info = std::fs::metadata(path).map_err(|e| e.to_string())?;
-        let modified = chrono::DateTime::<chrono::Utc>::from(
-            info.modified().map_err(|e| e.to_string())?,
-        ).timestamp_millis();
         let scanned = old.last_scan_time.unwrap_or(0);
-        if (!t_utils::is_cloud_only(&info) && old.metadata_pending)
-            || scanned <= 0 || modified > scanned || old.size != info.len() as i64 {
+        if !t_utils::is_cloud_only(&info) && old.needs_extraction(&info) {
+            return Ok(true);
+        }
+        if t_utils::is_cloud_only(&info)
+            && (scanned <= 0
+                || old.size != info.len() as i64
+                || old.modified_at != t_utils::systemtime_to_timestamp(info.modified().ok()))
+        {
             return Ok(true);
         }
         if crate::t_xmp::is_xmp_import_enabled()
-            && let Some(sidecar) = crate::t_xmp::find_xmp_sidecar(Path::new(path)) {
+            && let Some(sidecar) = crate::t_xmp::find_xmp_sidecar(Path::new(path))
+        {
             let modified = std::fs::metadata(sidecar)
-                .and_then(|info| info.modified()).map_err(|e| e.to_string())?;
-            return Ok(chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis() > scanned);
+                .and_then(|info| info.modified())
+                .map_err(|e| e.to_string())?;
+            return Ok(
+                chrono::DateTime::<chrono::Utc>::from(modified).timestamp_millis() > scanned,
+            );
         }
         Ok(false)
     }
@@ -4156,12 +4361,16 @@ impl AFile {
         let old_file_info =
             Self::get_file_info(file_id)?.ok_or_else(|| "File not found".to_string())?;
 
-        // create a new file info
+        // Do not publish metadata extracted from a changing source.
+        let version = source_version(file_path);
         let mut new_file_info = Self::new(
             old_file_info.folder_id,
             file_path,
             old_file_info.file_type.unwrap_or(0),
         )?;
+        if version != source_version(file_path) {
+            return Err("Source changed during metadata extraction".into());
+        }
         new_file_info.id = Some(file_id);
         new_file_info.is_favorite = old_file_info.is_favorite;
         new_file_info.rating = old_file_info.rating;
@@ -4192,6 +4401,7 @@ impl AFile {
 
         // update the file info
         Self::update(file_id, &new_file_info)?;
+        Self::update_column(file_id, "cloud_only", &false)?;
 
         let mut import_error = None;
         if crate::t_xmp::is_xmp_import_enabled() {
@@ -4202,21 +4412,19 @@ impl AFile {
             ) {
                 // Keep successful metadata, but make the failed import retryable.
                 Self::update_column(file_id, "metadata_pending", &true)?;
-                let content_changed = old_file_info.cloud_only
-                    || old_file_info.size != new_file_info.size
-                    || old_file_info.modified_at != new_file_info.modified_at;
-                if content_changed || old_file_info.width != new_file_info.width
-                    || old_file_info.height != new_file_info.height
-                    || old_file_info.e_orientation != new_file_info.e_orientation {
-                    AThumb::delete(file_id)?;
-                }
-                if content_changed {
-                    Self::update_column(file_id, "embeds", &Option::<Vec<u8>>::None)?;
-                }
-                import_error = Some(format!("XMP import failed: {error}"));
+                let message = format!("XMP import failed: {error}");
+                remember_refresh_failure(refresh_failure_key("metadata", file_id), metadata_failure_version(file_path), message.clone(), true);
+                import_error = Some(message);
             }
         }
 
+        let content_changed = old_file_info.size != new_file_info.size
+            || old_file_info.modified_at != new_file_info.modified_at;
+        if content_changed || old_file_info.width != new_file_info.width || old_file_info.height != new_file_info.height
+            || old_file_info.e_orientation != new_file_info.e_orientation {
+            AThumb::mark_stale(file_id)?;
+        }
+        if content_changed { Self::update_column(file_id, "embeds", &Option::<Vec<u8>>::None)?; }
         Ok((Self::get_file_info(file_id)?, import_error))
     }
 
@@ -7114,6 +7322,15 @@ impl AThumb {
         file_id.to_string()
     }
 
+    pub(crate) fn with_generation_guard<T>(
+        id: i64,
+        size: u32,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _guard = Self::acquire_generation_guard(id, size);
+        action()
+    }
+
     fn acquire_generation_guard(file_id: i64, thumbnail_size: u32) -> ThumbGenerationGuard {
         let key = Self::generation_lock_key(file_id, thumbnail_size);
         let locks = thumb_generation_locks();
@@ -7164,9 +7381,7 @@ impl AThumb {
     }
 
     fn get_current_library_id() -> String {
-        t_config::load_app_config()
-            .map(|c| c.current_library_id)
-            .unwrap_or_else(|_| "default".to_string())
+        t_config::current_library_id().unwrap_or_else(|_| "default".to_string())
     }
 
     fn build_thumb_key(
@@ -7287,16 +7502,18 @@ impl AThumb {
                 .as_nanos()
         ));
         fs::write(&temp_path, data).map_err(|e| e.to_string())?;
-        if let Err(first_error) = fs::rename(&temp_path, &path) {
-            // Windows does not replace an existing destination with rename.
-            if !path.exists()
-                || fs::remove_file(&path).is_err()
-                || fs::rename(&temp_path, &path).is_err()
-            {
-                let _ = fs::remove_file(&temp_path);
-                return Err(first_error.to_string());
-            }
-        }
+        #[cfg(windows)]
+        let published = {
+            use std::os::windows::ffi::OsStrExt;
+            use windows::{core::PCWSTR, Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH}};
+            let from: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) }
+                .map_err(|e| e.to_string())
+        };
+        #[cfg(not(windows))]
+        let published = fs::rename(&temp_path, &path).map_err(|e| e.to_string());
+        if let Err(error) = published { let _ = fs::remove_file(&temp_path); return Err(error); }
         Ok(path)
     }
 
@@ -7676,13 +7893,175 @@ impl AThumb {
 
     pub(crate) fn cached_montage_bytes(file_id: i64, path: &str, orientation: i32, options: RawDisplayOptions) -> Option<Vec<u8>> {
         let thumb = Self::fetch(file_id).ok()??;
-        if thumb.error_code != 0 || thumb.is_stale(path, 0) || thumb.raw_display_is_stale(path, orientation, options) {
+        if thumb.error_code != 0 || thumb.is_stale(path) || thumb.raw_display_is_stale(path, orientation, options) {
             return None;
         }
         thumb.thumb_data
     }
 
     /// fetch a thumbnail from db by file_id
+    pub(crate) fn fetch_record(file_id: i64) -> Result<Option<(Self, bool)>, String> {
+        Self::fetch_record_on(&*open_conn()?, file_id)
+    }
+
+    fn fetch_record_on(conn: &Connection, file_id: i64) -> Result<Option<(Self, bool)>, String> {
+        conn.query_row(
+            "SELECT id,file_id,error_code,thumb_key,thumb_mtime,thumb_size,updated_at,
+            COALESCE(length(thumb_data),0)>0 FROM athumbs WHERE file_id=?1",
+            [file_id],
+            |row| {
+                Ok((
+                    Self {
+                        id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        error_code: row.get(2)?,
+                        thumb_key: row.get(3)?,
+                        thumb_mtime: row.get(4)?,
+                        thumb_size: row.get(5)?,
+                        updated_at: row.get(6)?,
+                        thumb_data: None,
+                        thumb_data_base64: None,
+                    },
+                    row.get(7)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn mark_stale(file_id: i64) -> Result<(), String> {
+        Self::mark_stale_on(&*open_conn()?, file_id)
+    }
+
+    fn mark_stale_on(conn: &Connection, file_id: i64) -> Result<(), String> {
+        conn.execute(
+            "UPDATE athumbs SET thumb_mtime=NULL WHERE file_id=?1",
+            [file_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn cache_path_present(path: &Path) -> Result<bool, String> {
+        match fs::metadata(path) {
+            Ok(info) => Ok(info.is_file() && info.len() > 0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub(crate) fn auto_repair_allowed(file: &AFile, size: u32, options: RawDisplayOptions) -> bool {
+        let (Some(id), Some(path)) = (file.id, file.file_path.as_deref()) else {
+            return false;
+        };
+        let key = refresh_failure_key("thumbnail", id);
+        let exists = REFRESH_FAILURES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .is_ok_and(|failures| failures.contains_key(&key));
+        !exists
+            || recent_refresh_failure(
+                &key,
+                &Self::failure_version(
+                    id,
+                    path,
+                    size,
+                    file.e_orientation.unwrap_or(1) as i32,
+                    options,
+                ),
+            )
+            .is_none()
+    }
+
+    fn cache_file_present(
+        &self,
+        file: &AFile,
+        library_id: &str,
+        has_blob: bool,
+    ) -> Result<bool, String> {
+        if self.error_code == 2 {
+            return Ok(true);
+        }
+        if has_blob {
+            return Ok(true);
+        }
+        let (Some(album), Some(key)) = (file.album_id, self.thumb_key.as_deref()) else {
+            return Ok(false);
+        };
+        let _access = crate::t_cache_storage::access()?;
+        let extensions = if file
+            .file_path
+            .as_deref()
+            .is_some_and(t_image::should_use_png_thumbnail)
+        {
+            ["png", "jpg"]
+        } else {
+            ["jpg", "png"]
+        };
+        for ext in extensions {
+            let path = Self::get_thumb_cache_path_for_key(library_id, album, key, ext)?;
+            if Self::cache_path_present(&path)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn failure_version(
+        file_id: i64,
+        path: &str,
+        size: u32,
+        orientation: i32,
+        options: RawDisplayOptions,
+    ) -> String {
+        format!(
+            "{}:{}",
+            source_version(path),
+            Self::build_thumb_key(
+                &t_config::current_library_id().unwrap_or_default(),
+                file_id,
+                size,
+                Self::get_source_mtime(path),
+                orientation,
+                (t_utils::get_file_type(path) == Some(3)).then_some(options)
+            )
+        )
+    }
+
+    pub(crate) fn needs_refresh(
+        file: &AFile,
+        size: u32,
+        options: RawDisplayOptions,
+    ) -> Result<bool, String> {
+        let Some(path) = file.file_path.as_deref() else {
+            return Ok(false);
+        };
+        if !file.album_accessible || !t_utils::content_readable(path) {
+            return Ok(false);
+        }
+        let id = file.id.ok_or("File id missing")?;
+        let Some((thumb, has_blob)) = Self::fetch_record(id)? else {
+            return Ok(true);
+        };
+        if thumb.error_code == 1 {
+            return Ok(true);
+        }
+        if thumb.is_stale(path) {
+            return Ok(true);
+        }
+        if thumb.error_code == 2 {
+            return Ok(false);
+        }
+        if thumb.thumb_size != Some(size as i64) {
+            return Ok(true);
+        }
+        if thumb.raw_display_is_stale(path, file.e_orientation.unwrap_or(1) as i32, options) {
+            return Ok(true);
+        }
+        Ok(!thumb.cache_file_present(file, &Self::get_current_library_id(), has_blob)?)
+    }
+
     pub fn fetch(file_id: i64) -> Result<Option<Self>, String> {
         let library_id = Self::get_current_library_id();
         Self::fetch_for_library(file_id, &library_id)
@@ -7779,9 +8158,8 @@ impl AThumb {
         self.thumb_key.as_deref() != Some(key.as_str())
     }
 
-    fn is_stale(&self, file_path: &str, _thumbnail_size: u32) -> bool {
-        // A quality setting change must not invalidate the existing cache while
-        // browsing. Explicit refresh actions regenerate at the requested size.
+    fn is_stale(&self, file_path: &str) -> bool {
+        // Scan/refresh checks the requested thumbnail size separately.
         let current_mtime = Self::get_source_mtime(file_path);
         match (self.thumb_mtime, current_mtime) {
             (Some(cached_mtime), Some(source_mtime)) => cached_mtime != source_mtime,
@@ -7790,46 +8168,6 @@ impl AThumb {
             // Keep existing thumbnails so they work again when the path returns.
             (_, None) => false,
         }
-    }
-
-    /// Whether an explicit album re-scan should regenerate this thumbnail at
-    /// the currently selected size and RAW thumbnail source.
-    pub fn needs_thumbnail_regeneration(
-        file_id: i64,
-        thumbnail_size: u32,
-        prefer_embedded_raw_thumbnail: RawDisplayOptions,
-    ) -> bool {
-        Self::fetch(file_id)
-            .ok()
-            .flatten()
-            .is_some_and(|thumbnail| {
-                if thumbnail.error_code == 2 {
-                    return false;
-                }
-
-                let size_changed = thumbnail.thumb_size != Some(thumbnail_size as i64);
-
-                let Ok(Some(file)) = AFile::get_file_info(file_id) else {
-                    return size_changed;
-                };
-                if file.file_type.unwrap_or(0) != 3 {
-                    return size_changed;
-                }
-
-                if size_changed {
-                    return true;
-                }
-
-                let expected_key = Self::build_thumb_key(
-                    &Self::get_current_library_id(),
-                    file_id,
-                    thumbnail_size,
-                    file.file_path.as_deref().and_then(Self::get_source_mtime),
-                    file.e_orientation.unwrap_or(1) as i32,
-                    Some(prefer_embedded_raw_thumbnail),
-                );
-                thumbnail.thumb_key.as_deref() != Some(expected_key.as_str())
-            })
     }
 
     fn fetch_thumb_key(file_id: i64) -> Result<Option<String>, String> {
@@ -7841,88 +8179,6 @@ impl AThumb {
         )
         .optional()
         .map_err(|e| e.to_string())
-    }
-
-    fn persist_cache_and_clear_blob(
-        mut thumbnail: Self,
-        file_path: &str,
-        thumbnail_size: u32,
-        orientation: i32,
-    ) -> Result<Self, String> {
-        let Some(data) = thumbnail.thumb_data.as_ref() else {
-            return Self::hydrate_output_bytes_for_library(
-                thumbnail,
-                &Self::get_current_library_id(),
-            );
-        };
-
-        let library_id = Self::get_current_library_id();
-        let thumb_mtime = Self::get_source_mtime(file_path);
-        let now = Self::now_ts();
-        let thumb_key = thumbnail.thumb_key.clone().unwrap_or_else(|| {
-            Self::build_thumb_key(
-                &library_id,
-                thumbnail.file_id,
-                thumbnail_size,
-                thumb_mtime,
-                orientation,
-                None,
-            )
-        });
-
-        let album_id = Self::get_file_album_id(thumbnail.file_id)?
-            .ok_or_else(|| format!("Album not found for thumbnail file: {}", thumbnail.file_id))?;
-        Self::write_thumb_cache_bytes(&library_id, album_id, &thumb_key, data)?;
-
-        let conn = open_conn()?;
-        conn.execute(
-            "UPDATE athumbs
-            SET thumb_key = ?2, thumb_mtime = ?3, thumb_size = ?4, updated_at = ?5, thumb_data = NULL
-            WHERE file_id = ?1",
-            params![
-                thumbnail.file_id,
-                thumb_key,
-                thumb_mtime,
-                thumbnail_size as i64,
-                now,
-            ],
-        )
-        .map_err(|e| e.to_string())?;
-
-        thumbnail.thumb_key = Some(thumb_key);
-        thumbnail.thumb_mtime = thumb_mtime;
-        thumbnail.thumb_size = Some(thumbnail_size as i64);
-        thumbnail.updated_at = Some(now);
-        Self::hydrate_output_bytes_for_library(thumbnail, &library_id)
-    }
-
-    fn ensure_cached(
-        thumbnail: Self,
-        file_path: &str,
-        thumbnail_size: u32,
-        orientation: i32,
-    ) -> Result<Self, String> {
-        if thumbnail.error_code != 0 {
-            return Ok(thumbnail);
-        }
-
-        if thumbnail.thumb_data.is_some() {
-            return Self::persist_cache_and_clear_blob(
-                thumbnail,
-                file_path,
-                thumbnail_size,
-                orientation,
-            );
-        }
-
-        if thumbnail.thumb_key.is_some() {
-            return Self::hydrate_output_bytes_for_library(
-                thumbnail,
-                &Self::get_current_library_id(),
-            );
-        }
-
-        Ok(thumbnail)
     }
 
     fn create_cache_backed_thumb_for_library(
@@ -7957,6 +8213,7 @@ impl AThumb {
             return Self::fetch_for_library(file_id, library_id);
         }
 
+        let source_version = Self::failure_version(file_id, file_path, thumbnail_size, orientation, prefer_embedded_raw_thumbnail);
         let mut athumb = match Self::new_for_library(
             file_id,
             file_path,
@@ -7982,7 +8239,21 @@ impl AThumb {
             },
         };
 
+        if source_version != Self::failure_version(file_id, file_path, thumbnail_size, orientation, prefer_embedded_raw_thumbnail) {
+            return Err("Source changed during thumbnail generation".into());
+        }
+        if athumb.error_code == 1 {
+            remember_refresh_failure(refresh_failure_key("thumbnail", file_id),
+                Self::failure_version(file_id, file_path, thumbnail_size, orientation, prefer_embedded_raw_thumbnail),
+                "Thumbnail generation failed".into(), false);
+            if Self::fetch_record(file_id)?.is_some_and(|(old, _)| old.error_code == 0) {
+                return Ok(Some(athumb));
+            }
+        }
         if athumb.error_code == 0 {
+            if let Ok(mut failures) = REFRESH_FAILURES.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+                failures.remove(&refresh_failure_key("thumbnail", file_id));
+            }
             if let (Some(data), Some(key)) = (athumb.thumb_data.as_ref(), athumb.thumb_key.as_ref())
             {
                 let album_id = Self::get_file_album_id(file_id)?
@@ -8038,121 +8309,43 @@ impl AThumb {
         )
     }
 
-    /// Cached thumbnail of an online-only file, served without touching the original:
-    /// staleness checks would delete it, and a small image (error_code 2) is shown from its original.
-    fn cloud_only_cached(thumbnail: Self, file_path: &str, thumbnail_size: u32, orientation: i32) -> Result<Option<Self>, String> {
-        if thumbnail.error_code == 2 {
-            // Not persisted: the grid shows its placeholder until the file is local again.
-            return Ok(Some(Self { error_code: 1, ..thumbnail }));
-        }
-        Self::ensure_cached(thumbnail, file_path, thumbnail_size, orientation).map(Some)
-    }
-
+    /// Browsing only fills missing cache entries. Source changes and explicit
+    /// invalidation markers are consumed by scan/refresh, never by cache reads.
     pub fn get_thumb_if_available(
         file_id: i64,
         file_path: &str,
-        thumbnail_size: u32,
-        orientation: i32,
-        prefer_embedded_raw_thumbnail: RawDisplayOptions,
         force_regenerate: bool,
         album_accessible: bool,
     ) -> Result<Option<Self>, String> {
-        if !album_accessible || (force_regenerate && !t_utils::content_readable(file_path)) {
-            return Self::fetch(file_id);
-        }
-
-        if force_regenerate {
-            let _ = Self::delete(file_id);
-            return Ok(None);
-        }
-
-        if let Ok(Some(thumbnail)) = Self::fetch(file_id) {
-            if t_utils::is_cloud_only_path(file_path) {
-                return Self::cloud_only_cached(thumbnail, file_path, thumbnail_size, orientation);
-            }
-            if thumbnail.raw_display_is_stale(file_path, orientation, prefer_embedded_raw_thumbnail) {
-                let _ = Self::delete(file_id);
-                return Ok(None);
-            }
-            if thumbnail.error_code == 1 {
-                if thumbnail.is_stale(file_path, thumbnail_size) {
-                    let _ = Self::delete(file_id);
-                    return Ok(None);
-                }
-                return Ok(Some(thumbnail));
-            }
-
-            if thumbnail.error_code == 2 {
-                return Ok(Some(thumbnail));
-            }
-
-            if thumbnail.is_stale(file_path, thumbnail_size) {
-                let _ = Self::delete(file_id);
-                return Ok(None);
-            }
-
-            let hydrated = Self::ensure_cached(thumbnail, file_path, thumbnail_size, orientation)?;
-            if hydrated.thumb_data.is_some() {
-                return Ok(Some(hydrated));
-            }
-
-            let _ = Self::delete(file_id);
-        }
-
-        Ok(None)
+        Self::fetch(file_id)?
+            .map(|thumb| Self::resolve_fetched_thumb_if_available(
+                thumb, file_path, force_regenerate, album_accessible,
+            ))
+            .transpose()
+            .map(Option::flatten)
     }
 
     pub fn resolve_fetched_thumb_if_available(
         thumbnail: Self,
         file_path: &str,
-        thumbnail_size: u32,
-        orientation: i32,
-        prefer_embedded_raw_thumbnail: RawDisplayOptions,
         force_regenerate: bool,
-        trust_cached: bool,
         album_accessible: bool,
     ) -> Result<Option<Self>, String> {
-        if !album_accessible || (force_regenerate && !t_utils::content_readable(file_path)) {
+        if !album_accessible {
             return Ok(Some(thumbnail));
         }
-
-        if force_regenerate {
-            let _ = Self::delete(thumbnail.file_id);
-            return Ok(None);
-        }
-
         if t_utils::is_cloud_only_path(file_path) {
-            return Self::cloud_only_cached(thumbnail, file_path, thumbnail_size, orientation);
+            // A virtual thumbnail would read the online-only original.
+            return Ok(Some(if thumbnail.error_code == 2 {
+                Self { error_code: 1, ..thumbnail }
+            } else { thumbnail }));
         }
-
-        if thumbnail.raw_display_is_stale(file_path, orientation, prefer_embedded_raw_thumbnail) {
-            let _ = Self::delete(thumbnail.file_id);
-            return Ok(None);
+        if force_regenerate {
+            return Ok(if t_utils::content_readable(file_path) { None } else { Some(thumbnail) });
         }
-        if thumbnail.error_code == 1 {
-            if thumbnail.is_stale(file_path, thumbnail_size) {
-                let _ = Self::delete(thumbnail.file_id);
-                return Ok(None);
-            }
-            return Ok(Some(thumbnail));
-        }
-
-        if thumbnail.error_code == 2 {
-            return Ok(Some(thumbnail));
-        }
-
-        if !trust_cached && thumbnail.is_stale(file_path, thumbnail_size) {
-            let _ = Self::delete(thumbnail.file_id);
-            return Ok(None);
-        }
-
-        let hydrated = Self::ensure_cached(thumbnail, file_path, thumbnail_size, orientation)?;
-        if hydrated.thumb_data.is_some() {
-            return Ok(Some(hydrated));
-        }
-
-        let _ = Self::delete(hydrated.file_id);
-        Ok(None)
+        Ok((thumbnail.error_code != 0
+            || thumbnail.thumb_data.as_ref().is_some_and(|data| !data.is_empty()))
+            .then_some(thumbnail))
     }
 
     pub fn schedule_background_generation_for_library(
@@ -8167,60 +8360,94 @@ impl AThumb {
         force_regenerate: bool,
         seek_percent: Option<u8>,
     ) {
-        if !t_utils::album_accessible(album_id) { return; }
+        if !t_utils::album_accessible(album_id) {
+            return;
+        }
         if !Self::try_begin_background_task(file_id, thumbnail_size) {
             return;
         }
 
+        let library_id = Self::get_current_library_id();
         tauri::async_runtime::spawn(async move {
-            let Ok(_generation_permit) = thumb_background_generation_permits()
-                .acquire_owned()
-                .await
+            let Ok(_generation_permit) =
+                thumb_background_generation_permits().acquire_owned().await
             else {
                 Self::finish_background_task(file_id, thumbnail_size);
                 return;
             };
-
+            let event_library = library_id.clone();
             let generated = tauri::async_runtime::spawn_blocking(move || {
-                let duration = if file_type == 2 {
-                    AFile::get_file_info(file_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|f| f.duration.map(|d| d as u64))
-                } else {
-                    None
-                };
-
-                Self::get_or_create_thumb(
-                    file_id,
-                    &file_path,
-                    file_type,
-                    orientation,
-                    thumbnail_size,
-                    prefer_embedded_raw_thumbnail,
-                    force_regenerate,
-                    duration,
-                    seek_percent,
-                )
+                crate::t_cmds::with_current_library(&library_id, || {
+                    let had_cache = Self::fetch_record(file_id)?.is_some();
+                    let result = Self::get_or_create_thumb(
+                        file_id,
+                        &file_path,
+                        file_type,
+                        orientation,
+                        thumbnail_size,
+                        prefer_embedded_raw_thumbnail,
+                        force_regenerate,
+                        None,
+                        seek_percent,
+                    )?;
+                    Ok((result, had_cache))
+                })
             })
             .await;
-
-            if matches!(generated, Ok(Ok(Some(_)))) && album_id > 0 {
-                let _ = app_handle.emit(
-                    "thumbnail_ready",
-                    serde_json::json!({
-                        "album_id": album_id,
-                        "file_ids": [file_id],
-                        "invalidate": force_regenerate,
-                    }),
-                );
+            if let Ok(Ok((_, had_cache))) = generated {
+                if album_id > 0 {
+                    let _ = app_handle.emit("thumbnail_ready", serde_json::json!({
+                        "library_id": event_library, "album_id": album_id, "file_ids": [file_id], "invalidate": force_regenerate || had_cache, "metadata_changed": false,
+                    }));
+                }
             }
-
             Self::finish_background_task(file_id, thumbnail_size);
         });
     }
 
     /// get or create a thumbnail
+    pub(crate) fn refresh_file_and_thumbnail(
+        file_id: i64,
+        size: u32,
+        options: RawDisplayOptions,
+        retry_metadata: bool,
+    ) -> Result<(MetadataRefresh, Option<String>), String> {
+        Self::with_generation_guard(file_id, size, || {
+            let mut refresh = AFile::refresh_metadata(file_id, false, retry_metadata)?;
+            if refresh.skipped {
+                return Ok((refresh, None));
+            }
+            let needed = match Self::needs_refresh(&refresh.file, size, options) {
+                Ok(needed) => needed,
+                Err(error) => return Ok((refresh, Some(error))),
+            };
+            let error = if needed {
+                let file = &refresh.file;
+                match Self::get_or_create_thumb_locked(
+                    file_id,
+                    file.file_path.as_deref().unwrap_or_default(),
+                    file.file_type.unwrap_or(0),
+                    file.e_orientation.unwrap_or(1) as i32,
+                    size,
+                    options,
+                    true,
+                    file.duration.map(|d| d as u64),
+                    None,
+                ) {
+                    Ok(Some(thumb)) if thumb.error_code != 1 => {
+                        refresh.file.has_thumbnail = Some(true);
+                        None
+                    }
+                    Ok(_) => Some("Thumbnail generation failed".into()),
+                    Err(error) => Some(error),
+                }
+            } else {
+                None
+            };
+            Ok((refresh, error))
+        })
+    }
+
     pub fn get_or_create_thumb(
         file_id: i64,
         file_path: &str,
@@ -8232,56 +8459,67 @@ impl AThumb {
         known_duration: Option<u64>,
         seek_percent: Option<u8>,
     ) -> Result<Option<Self>, String> {
-        let album_accessible = Self::get_file_album_id(file_id)?.is_none_or(t_utils::album_accessible);
-        if !album_accessible || (force_regenerate && !t_utils::content_readable(file_path)) {
+        let before = Self::fetch_record(file_id)?.and_then(|(t, _)| t.id);
+        Self::with_generation_guard(file_id, thumbnail_size, || {
+            let file = AFile::get_file_info(file_id)?.ok_or("File not found")?;
+            let current = Self::fetch_record(file_id)?.and_then(|(t, _)| t.id);
+            Self::get_or_create_thumb_locked(
+                file_id,
+                file.file_path.as_deref().unwrap_or(file_path),
+                file.file_type.unwrap_or(file_type),
+                file.e_orientation.unwrap_or(orientation.max(1) as u32) as i32,
+                thumbnail_size,
+                prefer_embedded_raw_thumbnail,
+                force_regenerate && before == current,
+                file.duration.map(|d| d as u64).or(known_duration),
+                seek_percent,
+            )
+        })
+    }
+
+    fn get_or_create_thumb_locked(
+        file_id: i64,
+        file_path: &str,
+        file_type: i64,
+        orientation: i32,
+        thumbnail_size: u32,
+        options: RawDisplayOptions,
+        force: bool,
+        duration: Option<u64>,
+        seek: Option<u8>,
+    ) -> Result<Option<Self>, String> {
+        let accessible = Self::get_file_album_id(file_id)?.is_none_or(t_utils::album_accessible);
+        if !accessible || !t_utils::content_readable(file_path) {
             return Self::fetch(file_id);
         }
-
-        if force_regenerate {
-            let _ = Self::delete(file_id);
-        } else if let Some(thumb) =
-            Self::get_thumb_if_available(
+        if !force
+            && recent_refresh_failure(
+                &refresh_failure_key("thumbnail", file_id),
+                &Self::failure_version(file_id, file_path, thumbnail_size, orientation, options),
+            )
+            .is_some()
+        {
+            return Self::fetch(file_id);
+        }
+        if !force {
+            if let Some(thumb) = Self::get_thumb_if_available(
                 file_id,
                 file_path,
-                thumbnail_size,
-                orientation,
-                prefer_embedded_raw_thumbnail,
                 false,
-                album_accessible,
-            )?
-        {
-            if thumb.error_code != 1 {
+                accessible,
+            )? {
                 return Ok(Some(thumb));
             }
         }
-
-        let _generation_guard = Self::acquire_generation_guard(file_id, thumbnail_size);
-
-        if !force_regenerate {
-            if let Some(hydrated) = Self::get_thumb_if_available(
-                file_id,
-                file_path,
-                thumbnail_size,
-                orientation,
-                prefer_embedded_raw_thumbnail,
-                false,
-                album_accessible,
-            )? {
-                if hydrated.error_code != 1 {
-                    return Ok(Some(hydrated));
-                }
-            }
-        }
-
         Self::create_cache_backed_thumb(
             file_id,
             file_path,
             file_type,
             orientation,
             thumbnail_size,
-            prefer_embedded_raw_thumbnail,
-            known_duration,
-            seek_percent,
+            options,
+            duration,
+            seek,
         )
     }
 
@@ -10881,11 +11119,7 @@ mod raw_display_cache_tests {
         let retained = AThumb::resolve_fetched_thumb_if_available(
             thumb,
             "/lap-test-unmounted-volume/image.jpg",
-            512,
-            1,
-            RawDisplayOptions::default(),
             true,
-            false,
             true,
         )
         .unwrap()
@@ -10906,7 +11140,7 @@ mod raw_display_cache_tests {
             thumb_data_base64: Some("AQID".into()),
         };
         let retained = AThumb::resolve_fetched_thumb_if_available(
-            thumb, &path, 512, 1, RawDisplayOptions::default(), true, false, true,
+            thumb, &path, true, true,
         ).unwrap().unwrap();
         assert_eq!(retained.thumb_data, Some(vec![1, 2, 3]));
         assert!(crate::t_utils::is_cloud_only_path(&path), "the thumbnail check downloaded the file");
@@ -10923,7 +11157,7 @@ mod raw_display_cache_tests {
             thumb_mtime: Some(123), thumb_size: Some(256), updated_at: Some(123), thumb_data_base64: None,
         };
         let resolve = |t| AThumb::resolve_fetched_thumb_if_available(
-            t, &path, 512, 1, RawDisplayOptions::default(), false, false, true,
+            t, &path, false, true,
         ).unwrap();
         assert_eq!(resolve(thumb(0)).map(|t| t.error_code), Some(0), "a stale-dated cached thumbnail was dropped");
         assert_eq!(resolve(thumb(2)).map(|t| t.error_code), Some(1), "a small image would be shown from its original");
@@ -10943,8 +11177,7 @@ mod raw_display_cache_tests {
         // Even an apparently readable source must not be probed or regenerated
         // once its album has been classified as offline.
         let retained = AThumb::resolve_fetched_thumb_if_available(
-            thumb, original.to_str().unwrap(), 512, 1,
-            RawDisplayOptions::default(), true, false, false,
+            thumb, original.to_str().unwrap(), true, false,
         ).unwrap().unwrap();
         assert_eq!(retained.thumb_data, Some(vec![1, 2, 3]));
         assert_eq!(retained.thumb_key.as_deref(), Some("offline-cache-key"));
@@ -11145,4 +11378,148 @@ mod cloud_scan_tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+}
+
+#[cfg(test)]
+mod file_refresh_policy_tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("lap-refresh-policy-{}", uuid::Uuid::new_v4()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn thumbnail_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE athumbs(id INTEGER PRIMARY KEY,file_id INTEGER,error_code INTEGER,
+            thumb_data BLOB,thumb_key TEXT,thumb_mtime INTEGER,thumb_size INTEGER,updated_at INTEGER);
+            INSERT INTO athumbs VALUES(1,10,0,zeroblob(1048576),'cached-key',123,512,123);").unwrap();
+        conn
+    }
+    #[test]
+    fn metadata_uses_source_version_and_pending_without_backfilling_unknown_fields() {
+        let f = Fixture::new();
+        let path = f.0.join("a.jpg");
+        fs::write(&path, b"image").unwrap();
+        let info = fs::metadata(&path).unwrap();
+        let mut file = AFile {
+            size: info.len() as i64,
+            modified_at: t_utils::systemtime_to_timestamp(info.modified().ok()),
+            last_scan_time: Some(i64::MAX),
+            ..Default::default()
+        };
+        assert!(!file.needs_extraction(&info));
+        file.metadata_pending = true;
+        assert!(file.needs_extraction(&info));
+        file.metadata_pending = false;
+        file.cloud_only = true;
+        assert!(file.needs_extraction(&info));
+        file.cloud_only = false;
+        file.size += 1;
+        assert!(file.needs_extraction(&info));
+        file.size -= 1;
+        file.modified_at = Some(1);
+        assert!(file.needs_extraction(&info));
+    }
+    #[test]
+    fn lightweight_cache_query_does_not_return_legacy_blob_or_base64() {
+        let conn = thumbnail_db();
+        let (thumb, has_blob) = AThumb::fetch_record_on(&conn, 10).unwrap().unwrap();
+        assert!(has_blob);
+        assert!(thumb.thumb_data.is_none());
+        assert!(thumb.thumb_data_base64.is_none());
+        assert_eq!(thumb.thumb_key.as_deref(), Some("cached-key"));
+        assert!(AThumb::fetch_record_on(&conn, 99).unwrap().is_none());
+    }
+    #[test]
+    fn browsing_retains_cached_versions_and_invalidation_markers_without_writes() {
+        let f = Fixture::new();
+        let path = f.0.join("changed.jpg");
+        fs::write(&path, b"not readable metadata: browsing must not extract it").unwrap();
+        for stamp in [Some(1), None] {
+            for key in [Some("stored-key".to_string()), None] {
+                let cached = AThumb {
+                    id: Some(1), file_id: 10, error_code: 0,
+                    thumb_data: Some(vec![1, 2, 3]), thumb_data_base64: Some("AQID".into()),
+                    thumb_key: key.clone(), thumb_mtime: stamp, thumb_size: Some(256), updated_at: Some(1),
+                };
+                let result = AThumb::resolve_fetched_thumb_if_available(cached, path.to_str().unwrap(), false, true)
+                    .unwrap().unwrap();
+                assert_eq!(result.thumb_key, key);
+                assert_eq!(result.thumb_mtime, stamp);
+                assert_eq!(result.thumb_size, Some(256));
+                assert_eq!(result.updated_at, Some(1));
+                assert_eq!(result.thumb_data, Some(vec![1, 2, 3]));
+                assert!(result.is_stale(path.to_str().unwrap()), "scan/refresh must still see stale cache");
+            }
+        }
+        for data in [None, Some(Vec::new())] {
+            let cached = AThumb { id: Some(1), file_id: 10, error_code: 0, thumb_data: data,
+                thumb_data_base64: None, thumb_key: Some("missing-cache".into()), thumb_mtime: Some(1),
+                thumb_size: Some(256), updated_at: Some(1) };
+            assert!(AThumb::resolve_fetched_thumb_if_available(cached, path.to_str().unwrap(), false, true).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn missing_empty_and_nonempty_cache_files_are_checked_without_decoding() {
+        let f = Fixture::new();
+        let path = f.0.join("cached.jpg");
+        assert!(!AThumb::cache_path_present(&path).unwrap());
+        fs::write(&path, b"").unwrap();
+        assert!(!AThumb::cache_path_present(&path).unwrap());
+        fs::write(&path, b"decoder validates these bytes only when displayed").unwrap();
+        assert!(AThumb::cache_path_present(&path).unwrap());
+        assert!(!AThumb::cache_path_present(&f.0).unwrap());
+    }
+    #[test]
+    fn marking_cache_stale_preserves_previous_bytes_and_key() {
+        let conn = thumbnail_db();
+        AThumb::mark_stale_on(&conn, 10).unwrap();
+        let (thumb, has_blob) = AThumb::fetch_record_on(&conn, 10).unwrap().unwrap();
+        assert!(has_blob);
+        assert_eq!(thumb.thumb_key.as_deref(), Some("cached-key"));
+        assert_eq!(thumb.thumb_mtime, None);
+        let f = Fixture::new();
+        let path = f.0.join("a.jpg");
+        fs::write(&path, b"original").unwrap();
+        assert!(thumb.is_stale(path.to_str().unwrap()));
+        assert_eq!(
+            conn.query_row(
+                "SELECT length(thumb_data) FROM athumbs WHERE file_id=10",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1048576
+        );
+    }
+    #[test]
+    fn failure_cache_expires_and_source_version_changes_allow_a_retry() {
+        let key = uuid::Uuid::new_v4().to_string();
+        remember_refresh_failure(key.clone(), "v1".into(), "decode failed".into(), false);
+        assert_eq!(
+            recent_refresh_failure(&key, "v1"),
+            Some(("decode failed".into(), false))
+        );
+        assert_eq!(recent_refresh_failure(&key, "v2"), None);
+        remember_refresh_failure(key.clone(), "v2".into(), "XMP failed".into(), true);
+        REFRESH_FAILURES
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .get_mut(&key)
+            .unwrap()
+            .at = std::time::Instant::now() - Duration::from_secs(31);
+        assert_eq!(recent_refresh_failure(&key, "v2"), None);
+    }
 }

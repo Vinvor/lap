@@ -1306,8 +1306,8 @@ export async function getFileThumbById(fileId, thumbnailSize, forceRegenerate = 
   return null;
 }
 
-export async function getFileThumbs(files, thumbnailSize, forceRegenerate = false, trustCached = false) {
-  const thumbs = await invoke('get_file_thumbs', { files, thumbnailSize, rawDisplayOptions: getRawDisplayOptions(), forceRegenerate, trustCached });
+export async function getFileThumbs(files, thumbnailSize, forceRegenerate = false) {
+  const thumbs = await invoke('get_file_thumbs', { files, thumbnailSize, rawDisplayOptions: getRawDisplayOptions(), forceRegenerate });
   if (!Array.isArray(thumbs) || thumbs.length !== files.length) {
     throw new Error(`Invalid thumbnail batch response: expected ${files.length} results, received ${Array.isArray(thumbs) ? thumbs.length : 'a non-array response'}`);
   }
@@ -1348,7 +1348,7 @@ export async function updateFileInfo(fileId, filePath) {
 // refresh a file's info from disk; returns { file, size_delta, skipped }
 export async function refreshFileInfo(libraryId, fileId) {
   try {
-    return await invoke('refresh_selected_file_info', { libraryId, fileId });
+    return await invoke('refresh_selected_file_info', { libraryId, fileId, thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions() });
   } catch (error) {
     console.log('Failed to refresh file info:', error);
   }

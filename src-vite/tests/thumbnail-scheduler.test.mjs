@@ -186,6 +186,10 @@ test('production batch API propagates IPC errors and rejects malformed responses
     await assert.rejects(batchApi(async () => response)([{ fileId: 1 }], 512), /Invalid thumbnail batch response/);
   }
   assert.deepEqual(await batchApi(async () => [null])([{ fileId: 1 }], 512), [null]);
+  let args;
+  await batchApi(async (command, payload) => { args = payload; return [null]; })([{ fileId: 1 }], 512, true);
+  assert.deepEqual(args, { files: [{ fileId: 1 }], thumbnailSize: 512,
+    rawDisplayOptions: {}, forceRegenerate: true });
 });
 
 const adapter = ts.transpile(source.slice(source.indexOf('// Track current thumbnail request'),
@@ -201,19 +205,21 @@ function gridFixture(grouped = false, loadThumbs) {
   const memory = new Map();
   const errors = [];
   let dispose;
+  const library = { _libraryId: 'test' };
   const api = new Function('createThumbnailScheduler', 'config', 'getFileThumbs', 'gridRows',
     'visibleItemCount', 'lastVisibleRange', 'isItemRow', 'isRealFileItem', 'onBeforeUnmount',
-    'getCachedThumbnailDataUrl', 'getThumbnailDataUrl', 'thumbnailPlaceholder', 'console',
-    adapter + '; return { getFileListThumb, invalidateThumbnailRequests, refreshThumbnailViewport };')(
+    'getCachedThumbnailDataUrl', 'getThumbnailDataUrl', 'thumbnailPlaceholder', 'console', 'libConfig',
+    adapter + '; return { getFileListThumb, invalidateThumbnailRequests, refreshThumbnailViewport, invalidateRawThumbnailPolicy };')(
     createThumbnailScheduler, { settings: { thumbnailSize: 512 } },
-    requests => loadThumbs ? loadThumbs(requests, io) : io.load(requests), rows, { value: 4 }, range, row => row?.type === 'item',
+    (requests, thumbnailSize, forceRegenerate) => loadThumbs
+      ? loadThumbs(requests, io, { thumbnailSize, forceRegenerate }) : io.load(requests), rows, { value: 4 }, range, row => row?.type === 'item',
     file => file && !file.isPlaceholder && typeof file.id === 'number', callback => { dispose = callback; },
     id => memory.get(id), thumb => { memory.set(thumb.id, thumb.url); return thumb.url; },
-    'placeholder', { log(...args) { errors.push(args); } });
+    'placeholder', { log(...args) { errors.push(args); } }, library);
   const finish = index => io.calls[index].finish(io.calls[index].payloads.map(p => ({
     error_code: 0, id: p.fileId, url: `thumb:${p.fileId}`,
   })));
-  return { ...api, io, files, rows, range, memory, errors, finish, dispose: () => dispose() };
+  return { ...api, io, files, rows, range, memory, errors, finish, library, dispose: () => dispose() };
 }
 
 test('Content reports real API failures, releases slots and retries the same files', async () => {
@@ -330,5 +336,158 @@ test('explicit previews outside the viewport remain available and forced refresh
   grid.finish(1);
   grid.finish(2);
   await Promise.all([first, second]);
+  grid.dispose();
+});
+
+
+test('loaded memory thumbnails are checked once per viewport visit and rechecked after leaving', async () => {
+  const grid = gridFixture();
+  const file = grid.files[0];
+  file.thumbnail = 'old-thumbnail';
+  grid.memory.set(file.id, 'old-thumbnail');
+  const first = grid.getFileListThumb([file]);
+  await tick();
+  assert.equal(grid.io.calls.length, 1);
+  assert.equal(file.thumbnail, 'old-thumbnail');
+  grid.finish(0);
+  await first;
+  await grid.getFileListThumb([file]);
+  assert.equal(grid.io.calls.length, 1);
+  grid.range.start = 200; grid.range.end = 204;
+  grid.refreshThumbnailViewport();
+  grid.range.start = 0; grid.range.end = 3;
+  grid.refreshThumbnailViewport();
+  const second = grid.getFileListThumb([file]);
+  await tick();
+  assert.equal(grid.io.calls.length, 2);
+  grid.finish(1); await second;
+  grid.dispose();
+});
+
+test('thumbnail decoding failures request one repair for protocol and base64 cache sources', async () => {
+  const source = await readFile(new URL('../src/components/Thumbnail.vue', import.meta.url), 'utf8');
+  const start = source.indexOf('function retryThumbnail()');
+  const end = source.indexOf('// Robust ResizeObserver', start);
+  assert.ok(start >= 0 && end > start);
+  for (const src of ['thumb://localhost/lib/1', 'data:image/jpeg;base64,broken']) {
+    const calls = [];
+    const thumbnailSrc = { value: src };
+    const build = new Function('thumbnailSrc', 'getThumbUrl', 'props', 'config', 'isThumbnailLoaded',
+      `let thumbnailRetryCount = 0; ${source.slice(start, end)}; return retryThumbnail;`);
+    const retry = build(thumbnailSrc, (...args) => { calls.push(args); return 'thumb://localhost/lib/1?t=123'; },
+      { file: { id: 1, modified_at: 2 } }, { settings: { thumbnailSize: 512 } }, { value: true });
+    retry(); retry();
+    assert.equal(calls.length, 1);
+    assert.match(thumbnailSrc.value, /repair=true/);
+  }
+});
+
+
+test('explicit RAW policy changes request one replacement independently of viewport checks', async () => {
+  const policies = [];
+  const grid = gridFixture(false, (requests, io, options) => {
+    policies.push(options.forceRegenerate);
+    return io.load(requests);
+  });
+  const file = grid.files[0];
+  Object.assign(file, { file_type: 3, thumbnail: 'old', rawThumbnailStale: true });
+  grid.invalidateRawThumbnailPolicy();
+  grid.memory.set(file.id, 'old');
+  const replacement = grid.getFileListThumb([file]);
+  await tick();
+  assert.deepEqual(policies, [true]);
+  grid.io.calls[0].finish([null]); // The backend queued the explicit replacement.
+  await replacement;
+  grid.memory.clear();
+  const ready = grid.getFileListThumb([file], { bustCache: true });
+  await tick();
+  assert.deepEqual(policies, [true, false]);
+  grid.finish(1);
+  await ready;
+  assert.equal(file.thumbnail, 'thumb:1');
+  grid.dispose();
+});
+
+test('thumbnail-only repair clears frontend caches without fetching file info or reloading the original', async () => {
+  const anchor = source.indexOf("unlistenThumbnailReady = await listen('thumbnail_ready'");
+  const start = source.indexOf('async (event:', anchor);
+  const end = source.indexOf('\n  });', start);
+  assert.ok(anchor >= 0 && start > anchor && end > start);
+  const callback = ts.transpile(`const handler = ${source.slice(start, end + 4)}; return handler;`,
+    { target: ts.ScriptTarget.ES2022 });
+  const file = { id: 1, file_path: '/original.jpg', thumbnail: 'corrupt', size: 12 };
+  const cleared = [];
+  const loaded = [];
+  const revision = { value: 3 };
+  const deps = {
+    libConfig: { _libraryId: 'library' }, config: { settings: { thumbnailSize: 512 } },
+    fileList: { value: [file] }, selectedItemIndex: { value: 0 },
+    totalFileSize: { value: 12 }, fileInfoRevision: revision,
+    clearCachedThumbnailDataUrl: (...args) => cleared.push(args),
+    getFileListThumb: (...args) => loaded.push(args),
+    getFileInfo: () => { throw new Error('Thumbnail repair must not fetch file info'); },
+    nextTick: () => { throw new Error('Thumbnail repair must not reload the original'); },
+  };
+  const handler = new Function(...Object.keys(deps), callback)(...Object.values(deps));
+  await handler({ payload: { library_id: 'library', file_ids: [1], invalidate: true, metadata_changed: false } });
+  assert.deepEqual(cleared, [[1, 512]]);
+  assert.equal(loaded.length, 1);
+  assert.equal(loaded[0][0][0], file);
+  assert.deepEqual(loaded[0][1], { bustCache: true });
+  assert.equal(file.rawThumbnailStale, true);
+  assert.equal(file.file_path, '/original.jpg');
+  assert.equal(revision.value, 3);
+  assert.equal(deps.totalFileSize.value, 12);
+});
+
+
+test('single-file Refresh rereads an already displayed thumbnail without regenerating it', async () => {
+  const policies = [];
+  const grid = gridFixture(false, (requests, io, options) => {
+    policies.push(options.forceRegenerate);
+    return io.load(requests);
+  });
+  const file = grid.files[0];
+  const initial = grid.getFileListThumb([file]);
+  await tick();
+  grid.finish(0);
+  await initial;
+  assert.equal(file.thumbnail, 'thumb:1');
+  file.modified_at = 2; // The refresh command already updated metadata and disk cache.
+  const refreshed = grid.getFileListThumb([file], { bustCache: true, viewportBound: false });
+  await tick();
+  assert.equal(grid.io.calls.length, 2);
+  grid.io.calls[1].finish([{ error_code: 0, id: file.id, url: 'updated-thumbnail' }]);
+  await refreshed;
+  assert.equal(file.thumbnail, 'updated-thumbnail');
+  assert.equal(grid.memory.get(file.id), 'updated-thumbnail');
+  assert.deepEqual(policies, [false, false]);
+  grid.dispose();
+});
+
+test('RAW policy changes cover later albums and libraries once per file, including after row replacement', async () => {
+  const policies = [];
+  const grid = gridFixture(false, (requests, io, options) => {
+    policies.push(options.forceRegenerate);
+    return io.load(requests);
+  });
+  grid.invalidateRawThumbnailPolicy();
+  for (const [id, library, expected] of [[1001, 'test', true], [1002, 'test', true],
+    [1001, 'test', false], [1001, 'another-library', true]]) {
+    grid.invalidateThumbnailRequests(); // Album navigation does not lose the policy revision.
+    grid.library._libraryId = library;
+    grid.files[0] = { id, file_type: 3, file_path: '/another-album/photo.raw', modified_at: 1 };
+    const pending = grid.getFileListThumb([grid.files[0]]);
+    await tick();
+    assert.equal(policies.at(-1), expected);
+    grid.finish(grid.io.calls.length - 1);
+    await pending;
+  }
+  grid.invalidateRawThumbnailPolicy(); // A subsequent policy change applies again.
+  const pending = grid.getFileListThumb([grid.files[0]]);
+  await tick();
+  assert.equal(policies.at(-1), true);
+  grid.finish(grid.io.calls.length - 1);
+  await pending;
   grid.dispose();
 });

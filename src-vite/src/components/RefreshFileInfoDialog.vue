@@ -24,10 +24,6 @@
       <p v-else class="px-1 text-xs text-base-content/75" role="status">
         {{ $t(filesToUpdate().length ? 'msgbox.file_refresh.pending' : lastError ? 'msgbox.file_refresh.check_failed' : 'msgbox.file_refresh.up_to_date', { count: filesToUpdate().length.toLocaleString() }) }}
       </p>
-      <label v-if="ready && !freeSpace" class="flex items-center gap-2 px-1 text-xs text-base-content/75 cursor-pointer">
-        <input v-model="rebuildPreviews" type="checkbox" class="checkbox checkbox-xs" />
-        {{ $t('msgbox.file_refresh.rebuild_previews') }}
-      </label>
       <p v-if="lastWarning" class="text-xs text-warning wrap-break-word" role="status">{{ lastWarning }}</p>
       <p v-if="lastError" class="text-xs text-error/70 wrap-break-word" role="alert">{{ lastError }}</p>
     </section>
@@ -57,8 +53,7 @@ const activeIds = ref(selectionIds);
 const pendingIds = ref<number[]>([]);
 const checking = ref(!props.freeSpace);
 const ready = ref(false);
-const rebuildPreviews = ref(false);
-function filesToUpdate() { return rebuildPreviews.value ? selectionIds : pendingIds.value; }
+function filesToUpdate() { return pendingIds.value; }
 const running = ref(true);
 const cancelled = ref(false);
 const processed = ref(0);
@@ -99,7 +94,7 @@ async function checkSelection() {
     for (const fileId of selectionIds) {
       if (disposed || cancelled.value || libConfig._libraryId !== props.libraryId) break;
       try {
-        if (await invoke<boolean>('check_selected_file_info', { libraryId: props.libraryId, fileId, batchId })) pendingIds.value.push(fileId);
+        if (await invoke<boolean>('check_selected_file_info', { libraryId: props.libraryId, fileId, batchId, thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions() })) pendingIds.value.push(fileId);
       } catch (error) { lastError.value = String(error); }
       processed.value++;
     }
@@ -140,7 +135,7 @@ async function runRefresh(ids: number[]) {
               libraryId: props.libraryId, fileId, batchId,
               thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions(),
             })
-          : await invoke<FileRefreshResult | null>('refresh_selected_file_info', { libraryId: props.libraryId, fileId, batchId, rebuildPreviews: rebuildPreviews.value });
+          : await invoke<FileRefreshResult | null>('refresh_selected_file_info', { libraryId: props.libraryId, fileId, batchId, thumbnailSize: config.settings.thumbnailSize, rawDisplayOptions: getRawDisplayOptions() });
         if (result && props.freeSpace) result.release_requested ? releaseRequested.value++ : keptLocal.value++;
         if (result) {
           results.push(result);

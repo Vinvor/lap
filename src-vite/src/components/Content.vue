@@ -5977,7 +5977,9 @@ onMounted( async() => {
   });
 
   unlistenThumbnailReady = await listen('thumbnail_ready', async (event: any) => {
-    const { file_ids, invalidate = true } = event.payload || {};
+    const { file_ids, invalidate = true, library_id, metadata_changed = true } = event.payload || {};
+    const eventLibrary = libConfig._libraryId;
+    if (library_id && library_id !== eventLibrary) return;
     if (!Array.isArray(file_ids) || file_ids.length === 0) return;
 
     const readyIds = new Set(
@@ -6018,13 +6020,23 @@ onMounted( async() => {
     );
     if (loadedFiles.length === 0) return;
 
-    // Pick up the new modified_at value before rebuilding URLs; it is the
-    // persistent cache version for this file's contents.
-    await Promise.all(loadedFiles.map(async (file: any) => {
-      const refreshed = await getFileInfo(Number(file.id));
-      if (refreshed && fileList.value.includes(file)) Object.assign(file, refreshed);
-    }));
+    if (metadata_changed) {
+      // Pick up the new modified_at value before rebuilding URLs; it is the
+      // persistent cache version for this file's contents.
+      let sizeDelta = 0;
+      await Promise.all(loadedFiles.map(async (file: any) => {
+        const refreshed = await getFileInfo(Number(file.id));
+        if (refreshed && eventLibrary === libConfig._libraryId && fileList.value.includes(file)) {
+          sizeDelta += Number(refreshed.size || 0) - Number(file.size || 0);
+          Object.assign(file, refreshed);
+        }
+      }));
 
+      if (eventLibrary !== libConfig._libraryId) return;
+      totalFileSize.value += sizeDelta;
+      fileInfoRevision.value++;
+    }
+    if (eventLibrary !== libConfig._libraryId) return;
     // Keep the current thumbnail until its replacement is ready.
     for (const file of loadedFiles) {
       file.rawThumbnailStale = true;
@@ -6033,7 +6045,7 @@ onMounted( async() => {
     // Match Refresh file info: changing filePath makes Image.vue reload the
     // currently displayed file after its on-disk contents have changed.
     const activeFile = fileList.value[selectedItemIndex.value];
-    if (activeFile && readyIds.has(Number(activeFile.id || 0)) && activeFile.file_path) {
+    if (metadata_changed && activeFile && readyIds.has(Number(activeFile.id || 0)) && activeFile.file_path) {
       const activePath = activeFile.file_path;
       activeFile.file_path = '';
       await nextTick();
@@ -6186,7 +6198,7 @@ onBeforeUnmount(() => {
 watch(
   () => [config.settings.rawPreviewSource, config.settings.rawRenderBrightness, config.settings.rawPairDisplaySource, config.settings.groupRawJpegPairs],
   () => {
-    invalidateThumbnailRequests();
+    invalidateRawThumbnailPolicy();
     for (const file of fileList.value) {
       if (Number(file.file_type) === 3) {
         clearCachedThumbnailDataUrl(file.id, config.settings.thumbnailSize);
@@ -7158,7 +7170,7 @@ async function fetchMissingVisibleThumbnails(startIndex: number, endIndex: numbe
   const files = rows
     .map((row: any) => isItemRow(row) ? row.file : row)
     .filter((file: any) => {
-      if (!isRealFileItem(file) || (file.thumbnail && !file.rawThumbnailStale)) return false;
+      if (!isRealFileItem(file) || (file.thumbnail && !file.rawThumbnailStale && checkedThumbnailFiles.has(Number(file.id)))) return false;
       const fileId = Number(file.id || 0);
       if (fileId <= 0 || seen.has(fileId)) return false;
       seen.add(fileId);
@@ -7996,12 +8008,8 @@ async function updateContent(force = false, preserveMultiSelection = selectMode.
       getAlbum(libConfig.album.id).then(async album => {
         if (requestId !== currentContentRequestId) return;
         if(album) {
-          const wasInaccessible = album.is_accessible === false;
           album.is_accessible = await checkAlbumAccessibility(album.id);
           if (requestId !== currentContentRequestId) return;
-          if (wasInaccessible && album.is_accessible !== false) {
-            trustCachedThumbnailRequestId = currentThumbRequestId;
-          }
           if(libConfig.album.selected) {     
             // album is selected, show all files including subfolders
             contentTitle.value = album.name;
@@ -9444,6 +9452,7 @@ const refreshFileInfoFromPanel = async (file: any) => {
   else if (result.warning) toast.warning(message);
   fileInfoRevision.value++;
   void tauriEmit('tags-changed');
+  if (!result.skipped) await getFileListThumb([file], { bustCache: true, viewportBound: false });
 };
 
 // update the file info from the file; isRefresh = "Refresh file info" menu action
@@ -9467,7 +9476,8 @@ const updateFile = async (file: any, isRefresh = false) => {
     if (updatedFile) {
       Object.assign(file, updatedFile);
       if (isRefresh) { fileInfoRevision.value++; void tauriEmit('tags-changed'); }
-      await updateThumbForFile(file);
+      if (isRefresh) await getFileListThumb([file], { bustCache: true, viewportBound: false });
+      else await updateThumbForFile(file);
       await updateSelectedImage(selectedItemIndex.value);
 
       // Force Image.vue to reload the saved image by briefly nullifying file_path
@@ -10644,19 +10654,26 @@ function handleCollectionDeleted(collectionId: number) {
 let currentThumbRequestId = 0;
 let thumbnailRefreshVersion = 0;
 let thumbnailPriorities = new Map<number, number>();
+const checkedThumbnailFiles = new Set<number>();
+let rawThumbnailPolicyRevision = 0;
+const appliedRawThumbnailPolicies = new Set<string>();
+
+function invalidateRawThumbnailPolicy() {
+  rawThumbnailPolicyRevision++;
+  appliedRawThumbnailPolicies.clear();
+  invalidateThumbnailRequests();
+}
 const thumbnailScheduler = createThumbnailScheduler({
   // Cache-read IPC has a separate budget from backend background generation.
   priority: (task: any) => task.requestId !== currentThumbRequestId ? null
     : thumbnailPriorities.get(Number(task.file.id)) ?? (task.viewportBound ? null : 2),
-  loadBatch: (tasks: any[]) => getFileThumbs(tasks.map(({ file }) => ({
-    fileId: file.id, filePath: file.file_path, fileType: file.file_type,
-    orientation: file.e_orientation || 0, albumId: file.album_id || 0,
-  })), tasks[0].thumbnailSize, false, tasks[0].trustCached),
+  loadBatch: (tasks: any[]) => getFileThumbs(tasks.map(({ file }) => ({ fileId: file.id })), tasks[0].thumbnailSize, tasks[0].forceRegenerate),
 });
 
 function invalidateThumbnailRequests() {
   currentThumbRequestId++;
   thumbnailPriorities.clear();
+  checkedThumbnailFiles.clear();
   thumbnailScheduler.refresh();
 }
 
@@ -10672,6 +10689,7 @@ function refreshThumbnailViewport() {
     const file = isItemRow(row) ? row.file : row;
     if (isRealFileItem(file)) priorities.set(Number(file.id), index >= start && index <= end ? 0 : 1);
   }
+  for (const id of checkedThumbnailFiles) { if (!priorities.has(id)) checkedThumbnailFiles.delete(id); }
   thumbnailPriorities = priorities;
   thumbnailScheduler.refresh();
 }
@@ -10680,10 +10698,6 @@ onBeforeUnmount(() => {
   currentThumbRequestId++;
   thumbnailScheduler.dispose();
 });
-// A reconnected album can safely show its existing local thumbnail cache first.
-// A later scan/sync remains responsible for detecting files changed while offline.
-let trustCachedThumbnailRequestId = -1;
-
 function preserveLoadedThumbnails(files: any[]) {
   const thumbnailsById = new Map<number, string>();
   for (const file of fileList.value || []) {
@@ -10707,27 +10721,34 @@ function preserveLoadedThumbnails(files: any[]) {
 async function getFileListThumb(files: any[], { bustCache = false, viewportBound = true } = {}) {
   const requestId = currentThumbRequestId;
   const thumbnailSize = config.settings.thumbnailSize;
-  const trustCached = requestId === trustCachedThumbnailRequestId;
   const refreshVersion = bustCache ? ++thumbnailRefreshVersion : 0;
-  const group = `${requestId}:${thumbnailSize}:${trustCached}:${refreshVersion}`;
+  const group = `${requestId}:${thumbnailSize}:${refreshVersion}`;
   refreshThumbnailViewport();
 
   const candidates = files.filter((file: any) => isRealFileItem(file)
-    && (!file.thumbnail || file.rawThumbnailStale)
+    && (bustCache || !file.thumbnail || file.rawThumbnailStale || !checkedThumbnailFiles.has(Number(file.id)))
     && (!viewportBound || thumbnailPriorities.has(Number(file.id))));
   const load = async (file: any) => {
+    // Explicit setting changes survive file-object replacement and album switches.
+    const policyKey = Number(file.file_type) === 3 && rawThumbnailPolicyRevision > 0
+      ? `${rawThumbnailPolicyRevision}:${libConfig._libraryId}:${file.id}` : '';
+    const forceRegenerate = !!policyKey && !appliedRawThumbnailPolicies.has(policyKey);
     const cached = getCachedThumbnailDataUrl(file.id, thumbnailSize);
-    if (cached) {
+    if (!bustCache && !forceRegenerate && cached && checkedThumbnailFiles.has(Number(file.id))) {
       file.thumbnail = cached;
       file.rawThumbnailStale = false;
       return;
     }
     try {
       // group includes the refresh version, keeping forced refreshes independent.
-      const key = `${group}:${file.id}:${file.modified_at || 0}`;
-      const thumb = await thumbnailScheduler.request(key, group, {
-        file, requestId, thumbnailSize, trustCached, viewportBound,
+      const batchGroup = forceRegenerate ? `${group}:raw-policy` : group;
+      const key = `${batchGroup}:${file.id}:${file.modified_at || 0}`;
+      checkedThumbnailFiles.add(Number(file.id));
+      if (forceRegenerate) appliedRawThumbnailPolicies.add(policyKey);
+      const thumb = await thumbnailScheduler.request(key, batchGroup, {
+        file, requestId, thumbnailSize, viewportBound, forceRegenerate,
       });
+      if (forceRegenerate && thumb === undefined) appliedRawThumbnailPolicies.delete(policyKey);
       if (!thumb || requestId !== currentThumbRequestId) return;
       if (thumb.error_code === 0 || thumb.error_code === 2) {
         file.thumbnail = getThumbnailDataUrl(thumb, thumbnailPlaceholder, bustCache, thumbnailSize, file.file_path, Number(file.modified_at || 0), !file.cloud_only);
@@ -10737,6 +10758,8 @@ async function getFileListThumb(files: any[], { bustCache = false, viewportBound
         file.thumbnail = thumbnailPlaceholder;
       }
     } catch (error) {
+      if (forceRegenerate) appliedRawThumbnailPolicies.delete(policyKey);
+      checkedThumbnailFiles.delete(Number(file.id));
       console.log('Error fetching thumbnail:', error);
     }
   };
