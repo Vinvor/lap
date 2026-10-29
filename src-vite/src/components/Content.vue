@@ -527,10 +527,10 @@
             @toggleFavorite="toggleFavorite"
             @setRating="setSelectedFileRating"
             @setCulling="setSelectedFileCullingFlag"
-            @rotate="handleInfoAction(clickRotate)"
-            @quick-edit-tag="handleInfoAction(clickTag)"
-            @quick-edit-collection="handleInfoAction(clickAddToCollection)"
-            @quick-edit-comment="handleInfoAction(openCommentEditor)"
+            @rotate="rotateSelected(90, true)"
+            @quick-edit-tag="clickTag(true)"
+            @quick-edit-collection="clickAddToCollection(true)"
+            @quick-edit-comment="openCommentEditor(true)"
             @navigate-folder="handleInfoNavigateFolder"
             @navigate-metadata="handleNavigateMetadata"
             @navigate-person="handleNavigatePerson"
@@ -2159,7 +2159,9 @@ const dedupBulkFileCount = ref(0);
 const dedupPaneRef = ref<InstanceType<typeof DedupPane> | null>(null);
 const dedupStatuses = ref<Record<number, 'keep' | 'dup'>>({});
 const showCommentMsgbox = ref(false);
+const commentSingleFile = ref<any>(null);
 const commentInputText = computed(() => {
+  if (commentSingleFile.value) return commentSingleFile.value.comments ?? '';
   if (selectMode.value) {
     const selectedItems = getActionableSelectedItems();
     if (selectedItems.length === 0) return '';
@@ -3913,7 +3915,6 @@ function handleItemClicked(
       const anchorIndex = selectedItemIndex.value;
       handleSelectMode(true);
       setItemSelected(anchorIndex, true);
-      if (isGridLayoutView.value && config.rightPanel.show) selectionPanelOpen.value = true;
 
       selectedItemIndex.value = index;
       if (index !== anchorIndex) {
@@ -4029,7 +4030,6 @@ async function selectRangeFromSingleSelection(anchorIndex: number, targetIndex: 
 
   selectedItemIndex.value = targetIndex;
   lastSelectedIndex.value = targetIndex;
-  if (isGridLayoutView.value && config.rightPanel.show) selectionPanelOpen.value = true;
 }
 
 async function handleItemSelectToggled(index: number, shiftKey: boolean = false) {
@@ -4064,16 +4064,21 @@ async function handleItemSelectToggled(index: number, shiftKey: boolean = false)
   
   // Update last selected index
   lastSelectedIndex.value = index;
-  if (isGridLayoutView.value && config.rightPanel.show) selectionPanelOpen.value = true;
 }
 
-function toggleKeyboardSelection(direction: 'prev' | 'next') {
+function toggleKeyboardSelection(direction: 'prev' | 'next' | 'up' | 'down') {
   if (getActivePreviewMode() !== 'none') return false;
 
   const currentIndex = selectedItemIndex.value;
-  const nextIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1;
-  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= fileList.value.length) return false;
-  if (!ensureGroupedFileAtIndex(nextIndex)) return false;
+  const vertical = direction === 'up' || direction === 'down';
+  const nextIndex = vertical
+    ? usesGeometryNavigation.value
+      ? gridViewRef.value?.getNextItemIndex(currentIndex, direction) ?? -1
+      : Math.max(0, Math.min(fileList.value.length - 1,
+        currentIndex + (direction === 'down' ? 1 : -1) * (gridViewRef.value?.getColumnCount() || 1)))
+    : direction === 'next' ? currentIndex + 1 : currentIndex - 1;
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= fileList.value.length || nextIndex === currentIndex) return false;
+  const requestId = currentContentRequestId;
 
   checkUnsavedChanges(() => {
     void (async () => {
@@ -4088,9 +4093,11 @@ function toggleKeyboardSelection(direction: 'prev' | 'next') {
       const start = Math.min(keyboardSelectionAnchorIndex.value, nextIndex);
       const end = Math.max(keyboardSelectionAnchorIndex.value, nextIndex);
       if (!await hydrateSelectionRange(start, end)) {
+        if (requestId !== currentContentRequestId) return;
         toast.error(t('info_panel.selection_load_failed'));
         return;
       }
+      if (requestId !== currentContentRequestId || !selectMode.value) return;
       for (let i = start; i <= end; i++) {
         if (isRealFileItem(fileList.value[i])) {
           setItemSelected(i, true);
@@ -4982,6 +4989,11 @@ function handleQuickPreviewShortcut(event: { key: string; code?: string; repeat?
     return false;
   }
 
+  if (selectMode.value && getActivePreviewMode() === 'none') {
+    checkUnsavedChanges(() => { void handleItemSelectToggled(selectedItemIndex.value); });
+    return true;
+  }
+
   // Video Space is dispatched once by the capture handler above.
   if (getActivePreviewMode() !== 'none' && fileList.value[selectedItemIndex.value]?.file_type === 2) return true;
 
@@ -5112,6 +5124,8 @@ const handleKeyDown = (e: any) => {
     if (selectMode.value && selectedCount.value === 0) return;
     openTrashMsgbox();
   } else if (key === 'ArrowUp' || key === 'ArrowDown') {
+    if (event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey && !isFilmstripView.value
+      && toggleKeyboardSelection(key === 'ArrowDown' ? 'down' : 'up')) return;
     (keyActions as any)[key]();
   }
 };
@@ -9159,6 +9173,10 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
   const recordDeletedFile = (file: any) => {
     affectedAlbumIds.add(Number(file.album_id || 0));
     affectedFolderPaths.add(getFolderPath(file.file_path));
+    if (selectedFileIds.delete(Number(file.id))) {
+      file.isSelected = false;
+      applySelectionDelta(file, -1);
+    }
   };
   let failedDeleteCount = 0;
   let otherFailureCount = 0;
@@ -9210,6 +9228,20 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
         deletedItems.forEach(recordDeletedFile);
         deletedFileIds.push(...deletedItems.map(item => item.id));
       } else {
+        // Selected IDs can include virtual rows whose file metadata is not
+        // loaded. Capture only those missing records before deleting them.
+        const deleteRequestId = currentContentRequestId;
+        const candidateIds = new Set(ids.map(Number));
+        const filesToRecord = new Map(fileList.value
+          .filter(file => candidateIds.has(Number(file?.id)))
+          .map(file => [Number(file.id), file]));
+        const missingIds = ids.filter(id => selectedFileIds.has(Number(id)) && !filesToRecord.has(Number(id)));
+        for (let i = 0; i < missingIds.length; i += 500) {
+          const files = await getFilesByIds(missingIds.slice(i, i + 500));
+          if (deleteRequestId !== currentContentRequestId) return;
+          if (!Array.isArray(files)) throw new Error('Failed to load selected files before deletion');
+          for (const file of files) filesToRecord.set(Number(file.id), file);
+        }
         const result = await dedupDelete({ fileIds: ids });
         if (result !== undefined) {
           for (const path of result?.affectedFolderPaths || []) affectedFolderPaths.add(path);
@@ -9223,9 +9255,10 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
           );
           deletedFileIds.push(...resultDeletedIds);
           const deletedIdSet = new Set(deletedFileIds);
-          fileList.value
-            .filter(file => deletedIdSet.has(Number(file?.id)))
-            .forEach(recordDeletedFile);
+          for (const id of deletedIdSet) {
+            const file = filesToRecord.get(id);
+            if (file) recordDeletedFile(file);
+          }
           failedDeleteCount = Number(result?.failedCount || 0);
           if (trashFailedIdSet.size > 0) {
             pendingTrashFailedDedupGroupKey.value = dedupTrashGroupKey.value;
@@ -9889,9 +9922,9 @@ watch(() => config.settings.slideShowInterval, () => {
 // set file rotate
 const clickRotate = () => rotateSelected(90);
 
-const rotateSelected = async (rotateDelta: number) => {
-  if (selectMode.value && selectedCount.value === 0) return;
-  if (selectMode.value && selectedCount.value > 0) {
+const rotateSelected = async (rotateDelta: number, singleFile = false) => {
+  if (singleFile !== true && selectMode.value && selectedCount.value === 0) return;
+  if (singleFile !== true && selectMode.value && selectedCount.value > 0) {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
@@ -9926,10 +9959,10 @@ const rotateSelected = async (rotateDelta: number) => {
 };
 
 // set file tag
-const clickTag = async () => {
+const clickTag = async (singleFile = false) => {
   console.log('clickTag');
-  if (selectMode.value && selectedCount.value === 0) return;
-  if (selectMode.value) {
+  if (singleFile !== true && selectMode.value && selectedCount.value === 0) return;
+  if (singleFile !== true && selectMode.value) {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     const fileIds = items.map(file => file.id);
@@ -9943,9 +9976,9 @@ const clickTag = async () => {
   showTaggingDialog.value = true;
 }
 
-const clickAddToCollection = async () => {
-  if (selectMode.value && selectedCount.value === 0) return;
-  if (selectMode.value) {
+const clickAddToCollection = async (singleFile = false) => {
+  if (singleFile !== true && selectMode.value && selectedCount.value === 0) return;
+  if (singleFile !== true && selectMode.value) {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
@@ -9959,6 +9992,15 @@ const clickAddToCollection = async () => {
 };
 
 const onEditComment = async (newComment: any) => {
+  if (commentSingleFile.value) {
+    const file = commentSingleFile.value;
+    if (await editFileComment(file.id, newComment)) {
+      file.comments = newComment;
+      syncFileMetaToImageViewer(file.id, { comments: newComment });
+      showCommentMsgbox.value = false;
+    }
+    return;
+  }
   if (selectMode.value && selectedCount.value > 0) {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
@@ -9991,7 +10033,12 @@ const onEditComment = async (newComment: any) => {
   }
 }
 
-const openCommentEditor = () => {
+const openCommentEditor = (singleFile = false) => {
+  commentSingleFile.value = singleFile === true ? fileList.value[selectedItemIndex.value] : null;
+  if (commentSingleFile.value) {
+    showCommentMsgbox.value = true;
+    return;
+  }
   if ((selectMode.value && selectedCount.value > 0) || (!selectMode.value && selectedItemIndex.value >= 0)) {
     showCommentMsgbox.value = true;
   }
@@ -10029,7 +10076,6 @@ const selectAllInCurrentList = async () => {
       .reduce((total, size) => total + Number(size || 0), 0);
     syncSelectionVersions();
     selectMode.value = true;
-    if (isGridLayoutView.value && config.rightPanel.show) selectionPanelOpen.value = true;
     return;
   }
 
@@ -10063,7 +10109,6 @@ const selectAllInCurrentList = async () => {
   selectedSize.value = selectedFileIds.size === totalFileCount.value ? totalFileSize.value : nextSize;
   syncSelectionVersions();
   selectMode.value = true;
-  if (isGridLayoutView.value && config.rightPanel.show) selectionPanelOpen.value = true;
 };
 
 const selectNoneInCurrentList = () => {
@@ -10129,11 +10174,6 @@ function openSelectionPanel() {
     if (!selectMode.value) handleSelectMode(true);
     selectionPanelOpen.value = true;
   });
-}
-
-function handleInfoAction(action: () => void) {
-  if (selectMode.value) handleSelectMode(false);
-  action();
 }
 
 watch(isMapView, (active) => {
@@ -10301,7 +10341,6 @@ const toggleInfoPanel = () => {
       if (preview.isFullScreen) return;
     }
     const wasInfoPanelOpen = isInfoPanelOpen.value;
-    if (selectMode.value) handleSelectMode(false);
     if (wasInfoPanelOpen && !wasPreviewFullScreen) {
       config.rightPanel.show = false;
       return;
@@ -10316,7 +10355,6 @@ const toggleDedupPanel = () => {
   if (isScanStreamingMode.value) return;
   checkUnsavedChanges(() => {
     const wasDedupPanelOpen = isDedupPanelOpen.value;
-    if (selectMode.value) handleSelectMode(false);
     if (wasDedupPanelOpen) {
       config.rightPanel.show = false;
       return;
@@ -10326,20 +10364,10 @@ const toggleDedupPanel = () => {
 };
 
 async function openDedupPanel() {
-  const wasInSelectMode = selectMode.value;
-  if (wasInSelectMode) selectMode.value = false;
+  selectionPanelOpen.value = false;
   disablePreviewModes();
   config.rightPanel.mode = 'dedup';
   config.rightPanel.show = true;
-
-  await nextTick();
-  await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
-
-  if (!wasInSelectMode) return;
-  clearLoadedSelectionFlags();
-  resetSelectionSummary();
-  groupSelectedCountMap.value = {};
-  groupSelectedSizeMap.value = {};
 }
 
 let dedupNavigationRequestId = 0;

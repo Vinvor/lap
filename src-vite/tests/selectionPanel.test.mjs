@@ -27,14 +27,14 @@ function fixture({ show = true, grid = true, hydrated = true } = {}) {
   return values;
 }
 
-test('Shift range selection replaces an open info or dedup panel', async () => {
+test('Shift range selection preserves an open info or dedup panel', async () => {
   for (const mode of ['info', 'dedup']) {
     const f = fixture();
     f.config.rightPanel.mode = mode;
     const select = loadFunction('selectRangeFromSingleSelection', 'async function handleItemSelectToggled', f);
     await select(0, 2);
     assert.equal(f.selectMode.value, true);
-    assert.equal(f.selectionPanelOpen.value, true);
+    assert.equal(f.selectionPanelOpen.value, false);
     assert.equal(f.fileList.value.every(file => file.isSelected), true);
   }
 });
@@ -48,12 +48,12 @@ test('a hidden panel, filmstrip, or failed range load does not open the selectio
   }
 });
 
-test('Shift range selection also opens the panel when selection mode is already active', async () => {
+test('Shift range selection keeps the floating state when selection mode is already active', async () => {
   const f = fixture();
   f.selectMode.value = true;
   const toggle = loadFunction('handleItemSelectToggled', 'function toggleKeyboardSelection', f);
   await toggle(2, true);
-  assert.equal(f.selectionPanelOpen.value, true);
+  assert.equal(f.selectionPanelOpen.value, false);
 });
 
 test('Escape closes the selection panel without restoring info or dedup', () => {
@@ -77,7 +77,7 @@ test('Escape closes the selection panel without restoring info or dedup', () => 
   }
 });
 
-test('info and dedup buttons always leave selection mode, including when their panel is already visible', async () => {
+test('info and dedup buttons preserve selection mode, including when their panel is already visible', async () => {
   const start = source.indexOf('const toggleInfoPanel = () => {');
   const end = source.indexOf('async function openDedupPanel()', start);
   const code = ts.transpile(source.slice(start, end), { target: ts.ScriptTarget.ES2022 });
@@ -96,12 +96,12 @@ test('info and dedup buttons always leave selection mode, including when their p
         getActivePreviewMediaRef: () => null,
         checkUnsavedChanges(action) { pending = action(); },
         handleSelectMode(value) { f.selectMode.value = value; f.selectionPanelOpen.value = false; },
-        openDedupPanel() { f.config.rightPanel.mode = 'dedup'; f.config.rightPanel.show = true; },
+        openDedupPanel() { f.selectionPanelOpen.value = false; f.config.rightPanel.mode = 'dedup'; f.config.rightPanel.show = true; },
       };
       const buttons = new Function(...Object.keys(values), `${code}; return { toggleInfoPanel, toggleDedupPanel };`)(...Object.values(values));
       buttons[mode === 'info' ? 'toggleInfoPanel' : 'toggleDedupPanel']();
       await pending;
-      assert.equal(f.selectMode.value, false);
+      assert.equal(f.selectMode.value, true);
       assert.equal(f.selectionPanelOpen.value, false);
       assert.equal(f.config.rightPanel.show, !panelVisible);
       assert.equal(f.config.rightPanel.mode, mode);
@@ -110,7 +110,7 @@ test('info and dedup buttons always leave selection mode, including when their p
 });
 
 
-test('Ctrl/Cmd click replaces an open panel, including a click on the current item', async () => {
+test('Ctrl/Cmd click preserves an open panel, including a click on the current item', async () => {
   for (const modifier of ['ctrlKey', 'metaKey']) {
     for (const index of [0, 1]) {
       const f = fixture();
@@ -122,12 +122,12 @@ test('Ctrl/Cmd click replaces an open panel, including a click on the current it
       const click = new Function(...Object.keys(f), `${code}; return handleItemClicked;`)(...Object.values(f));
       click(index, {[modifier]:true});
       assert.equal(f.selectMode.value, true);
-      assert.equal(f.selectionPanelOpen.value, true);
+      assert.equal(f.selectionPanelOpen.value, false);
     }
   }
 });
 
-test('select all opens selection panel for both flat and grouped lists, respecting hidden panels and filmstrip', async () => {
+test('select all preserves the existing panel for both flat and grouped lists', async () => {
   const start = source.indexOf('const selectAllInCurrentList = async () => {');
   const code = ts.transpile(source.slice(start, source.indexOf('const selectNoneInCurrentList', start)), {target:ts.ScriptTarget.ES2022});
   for (const grouped of [false, true]) {
@@ -139,7 +139,7 @@ test('select all opens selection panel for both flat and grouped lists, respecti
       const select = new Function(...Object.keys(f), `${code}; return selectAllInCurrentList;`)(...Object.values(f));
       await select();
       assert.equal(f.selectMode.value, true);
-      assert.equal(f.selectionPanelOpen.value, options.show !== false && options.grid !== false);
+      assert.equal(f.selectionPanelOpen.value, false);
       assert.equal(f.selectedCount.value, 3);
     }
   }
