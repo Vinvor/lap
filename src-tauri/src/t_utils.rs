@@ -54,15 +54,9 @@ pub fn trash_path(path: &str) -> Result<(), String> {
         return Err(format!("Path does not exist: {}", path));
     }
 
+    // A successful OS trash operation is authoritative. Rechecking a
+    // network path immediately can see stale SMB/NAS metadata.
     move_to_trash(path)?;
-
-    if path_exists(path) {
-        return Err(format!(
-            "Failed to move path to Trash. The path still exists on disk: {}",
-            path
-        ));
-    }
-
     Ok(())
 }
 
@@ -104,16 +98,11 @@ pub fn delete_file_permanently(path: &str) -> Result<(), String> {
         ));
     }
 
+    // `remove_file` returning Ok means the OS accepted the deletion.
+    // Immediate re-statting across SMB can report stale cached metadata,
+    // turning a real success into a misleading failure.
     fs::remove_file(path)
         .map_err(|e| format!("Failed to permanently delete file: {} ({})", path, e))?;
-
-    if path_exists(path) {
-        return Err(format!(
-            "Failed to permanently delete file. The path still exists on disk: {}",
-            path
-        ));
-    }
-
     Ok(())
 }
 

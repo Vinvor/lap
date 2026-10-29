@@ -9,9 +9,10 @@ use crate::t_face;
 use crate::t_image;
 use crate::t_montage;
 use crate::t_apple_sidecar::{
-    apple_aae_sidecar_paths, build_apple_sidecar_rename_plan,
+    apple_aae_sidecar_paths_checked, AaeDirectoryIndex,
+    invalidate_aae_cache_for_path, build_apple_sidecar_rename_plan,
     collect_original_rename_db_names, collect_replaced_file_ids_for_targets,
-    delete_apple_aae_sidecars, preflight_rename_plan, resolve_group_primary_target,
+    preflight_rename_plan, resolve_group_primary_target,
     rollback_copied_transfers, rollback_rename_changes, rollback_renamed_sidecars,
 };
 use crate::t_similar;
@@ -855,7 +856,7 @@ pub fn rename_folder(folder_path: &str, new_folder_name: &str) -> Option<String>
 }
 
 /// move a folder
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_folder(
     folder_path: &str,
     new_album_id: i64,
@@ -896,7 +897,7 @@ pub fn move_folder(
 }
 
 /// move a folder outside the library and remove its database records
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_folder_outside_library(
     folder_path: &str,
     new_folder_path: &str,
@@ -1598,7 +1599,7 @@ pub async fn batch_rename_files(
 }
 
 /// rename a file
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Result<Option<String>, String> {
     let sidecar_rename_plan = build_apple_sidecar_rename_plan(file_id, file_path, new_name)?;
     if !preflight_rename_plan(file_path, new_name, &sidecar_rename_plan) {
@@ -1654,6 +1655,7 @@ pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Result<Opti
                 return Ok(None);
             }
             xmp.commit();
+            invalidate_aae_cache_for_path(Path::new(file_path));
             Ok(Some(new_file_path))
         }
         None => {
@@ -1664,7 +1666,7 @@ pub fn rename_file(file_id: i64, file_path: &str, new_name: &str) -> Result<Opti
 }
 
 /// move a file to dest folder
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_file(
     file_id: i64,
     file_path: &str,
@@ -1782,7 +1784,13 @@ fn move_file_with_cache(
         transfer.finalize()?;
     }
     xmp.commit_with_cache(xmp_cache);
-    transfer.finalize()
+    let result = transfer.finalize();
+    if result.is_ok() {
+        // The destination may now contain new AAE filenames.
+        invalidate_aae_cache_for_path(Path::new(file_path));
+        invalidate_aae_cache_for_path(&primary_target);
+    }
+    result
 }
 
 #[tauri::command]
@@ -1795,7 +1803,7 @@ pub fn end_file_transfer_batch(batch_id: u64) {
 }
 
 /// move a file outside the library and remove its database record
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_file_outside_library(
     file_id: i64,
     file_path: &str,
@@ -1875,7 +1883,13 @@ fn move_file_outside_library_with_cache(
         transfer.finalize()?;
     }
     xmp.commit_with_cache(xmp_cache);
-    transfer.finalize()
+    let result = transfer.finalize();
+    if result.is_ok() {
+        // The destination may now contain new AAE filenames.
+        invalidate_aae_cache_for_path(Path::new(file_path));
+        invalidate_aae_cache_for_path(&primary_target);
+    }
+    result
 }
 
 /// copy a file to dest folder
@@ -2401,13 +2415,13 @@ pub async fn import_clipboard(
 }
 
 /// delete a file
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_file(file_id: i64, file_path: &str) -> Result<BatchDeleteResult, String> {
     delete_file_group(file_id, file_path, false)
 }
 
 /// delete a file permanently
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_file_permanently(
     file_id: i64,
     file_path: &str,
@@ -2421,6 +2435,7 @@ fn delete_file_group(
     permanently: bool,
 ) -> Result<BatchDeleteResult, String> {
     let component_files = AFile::live_photo_component_files(file_id)?;
+    let aae_sidecars = apple_aae_sidecar_paths_checked(file_path)?;
     let mut deleted_file_ids = Vec::with_capacity(component_files.len() + 1);
     let mut delete_errors = Vec::new();
 
@@ -2435,6 +2450,7 @@ fn delete_file_group(
         }
         return Ok(BatchDeleteResult {
             failed_count: 1,
+            sidecar_warning_count: 0,
             deleted_file_ids: Vec::new(),
             trash_failed_file_ids: vec![file_id],
         });
@@ -2462,8 +2478,18 @@ fn delete_file_group(
         }
     }
 
-    if let Err(error) = delete_apple_aae_sidecars(file_path, permanently) {
-        delete_errors.push(format!("Failed to delete Apple sidecar: {}", error));
+    for sidecar in aae_sidecars {
+        let sidecar_path = sidecar.to_string_lossy();
+        let result = if permanently {
+            t_utils::delete_file_permanently(&sidecar_path)
+        } else {
+            t_utils::trash_path(&sidecar_path)
+        };
+        if let Err(error) = result {
+            delete_errors.push(format!(
+                "Failed to delete Apple sidecar '{}': {}", sidecar.display(), error
+            ));
+        }
     }
 
     if let Err(error) = crate::t_xmp_files::delete_orphans(
@@ -2472,14 +2498,15 @@ fn delete_file_group(
     ) { delete_errors.push(error); }
 
     AFile::batch_delete(&deleted_file_ids)
-        .map_err(|e| format!("Error while deleting removed files from DB: {}", e))?;
+        .map_err(|e| format!("Photos already deleted on disk, but Lap DB cleanup failed: {}", e))?;
 
-    let failed_count = usize::from(!delete_errors.is_empty());
+    let sidecar_warning_count = delete_errors.len();
     for error in delete_errors {
-        eprintln!("{}", error);
+        eprintln!("Sidecar warning (primary photo deleted): {error}");
     }
     Ok(BatchDeleteResult {
-        failed_count,
+        failed_count: 0,
+        sidecar_warning_count,
         deleted_file_ids,
         trash_failed_file_ids: Vec::new(),
     })
@@ -2503,7 +2530,10 @@ pub struct BatchDeleteFile {
 #[serde(rename_all = "camelCase")]
 pub struct BatchDeleteResult {
     pub deleted_file_ids: Vec<i64>,
+    /// Number of primary photos that could not be deleted.
     pub failed_count: usize,
+    /// Associated sidecar cleanup issues; primary photos were still removed.
+    pub sidecar_warning_count: usize,
     pub trash_failed_file_ids: Vec<i64>,
 }
 
@@ -2543,26 +2573,24 @@ pub(crate) fn delete_files_grouped(
     }
     let mut delete_groups = Vec::with_capacity(files.len());
     let mut seen_ids = HashSet::new();
-    let mut seen_aae_paths = HashSet::new();
+    let mut seen_aae_paths = HashSet::<PathBuf>::new();
+    let mut aae_index = AaeDirectoryIndex::default();
     for file in &files {
         if !seen_ids.insert(file.file_id) {
             continue;
         }
         let mut component_targets = Vec::new();
-        if let Ok(components) = AFile::live_photo_component_files(file.file_id) {
-            for component in components {
+        for component in AFile::live_photo_component_files(file.file_id)? {
                 if let (Some(id), Some(path)) = (component.id, component.file_path) {
                     if seen_ids.insert(id) {
                         component_targets.push((id, path));
                     }
                 }
-            }
         }
         let mut aae_sidecars = Vec::new();
-        for sidecar in apple_aae_sidecar_paths(&file.file_path) {
-            let sidecar_path = sidecar.to_string_lossy().into_owned();
-            if seen_aae_paths.insert(sidecar_path.to_ascii_lowercase()) {
-                aae_sidecars.push(sidecar_path);
+        for sidecar in aae_index.paths(&file.file_path)? {
+            if seen_aae_paths.insert(sidecar.clone()) {
+                aae_sidecars.push(sidecar.to_string_lossy().into_owned());
             }
         }
         delete_groups.push(DeleteGroup {
@@ -2574,7 +2602,9 @@ pub(crate) fn delete_files_grouped(
     }
 
     let mut deleted_file_ids = Vec::new();
+    let mut removed_image_paths = Vec::<PathBuf>::new();
     let mut failed_count = 0usize;
+    let mut sidecar_warning_count = 0usize;
     let mut trash_failed_file_ids = Vec::new();
     for group in &delete_groups {
         let result = if permanently {
@@ -2590,6 +2620,7 @@ pub(crate) fn delete_files_grouped(
             continue;
         }
         deleted_file_ids.push(group.primary_id);
+        removed_image_paths.push(PathBuf::from(&group.primary_path));
         let mut group_failed = false;
 
         for (file_id, file_path) in &group.components {
@@ -2600,6 +2631,7 @@ pub(crate) fn delete_files_grouped(
             };
             if result.is_ok() {
                 deleted_file_ids.push(*file_id);
+                removed_image_paths.push(PathBuf::from(file_path));
             } else {
                 group_failed = true;
                 eprintln!("Failed to delete Live Photo sidecar: {}", file_path);
@@ -2619,19 +2651,27 @@ pub(crate) fn delete_files_grouped(
         }
 
         if group_failed {
-            failed_count += 1;
+            sidecar_warning_count += 1;
         }
     }
 
-    if let Err(error) = crate::t_xmp_files::delete_orphans(
-        delete_groups.iter().flat_map(|group| std::iter::once(Path::new(&group.primary_path))
-            .chain(group.components.iter().map(|(_, path)| Path::new(path)))), permanently,
-    ) { failed_count += 1; eprintln!("Failed to delete XMP sidecars: {error}"); }
+    // Never touch the XMP of an image whose physical deletion failed.
+    if !removed_image_paths.is_empty() {
+        if let Err(error) = crate::t_xmp_files::delete_orphans(
+            removed_image_paths.iter().map(PathBuf::as_path), permanently,
+        ) {
+            sidecar_warning_count += 1;
+            eprintln!("Failed to delete XMP sidecars (primary photo status unchanged): {error}");
+        }
+    }
 
     AFile::batch_delete(&deleted_file_ids)
-        .map_err(|e| format!("Error while deleting files from DB: {}", e))?;
+        .map_err(|e| format!(
+            "Some photos were deleted on disk, but Lap DB cleanup failed: {}", e
+        ))?;
     Ok(BatchDeleteResult {
         failed_count,
+        sidecar_warning_count,
         deleted_file_ids,
         trash_failed_file_ids,
     })

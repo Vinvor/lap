@@ -48,7 +48,7 @@ pub(crate) fn build_apple_sidecar_rename_plan(
     new_name: &str,
 ) -> Result<Vec<SidecarRenamePlan>, String> {
     let components = AFile::live_photo_component_files(file_id)?;
-    build_rename_plan(file_path, new_name, &components, apple_aae_sidecar_paths(file_path))
+    build_rename_plan(file_path, new_name, &components, apple_aae_sidecar_paths_checked(file_path)?)
 }
 
 pub(crate) fn build_apple_sidecar_rename_plan_cached(
@@ -80,7 +80,7 @@ fn build_rename_plan(
             if let Some(plan) =
                 build_sidecar_rename_plan(Path::new(old_path), new_stem, component.id)
             {
-                if seen_sidecar_paths.insert(normalize_sidecar_path_key(&plan.old_path)) {
+                if seen_sidecar_paths.insert(plan.old_path.clone()) {
                     plans.push(plan);
                 }
             }
@@ -92,7 +92,7 @@ fn build_rename_plan(
             if let Some(plan) =
                 build_aae_rename_plan(primary_path, parent, &old_path, new_name, new_stem)
             {
-                if seen_sidecar_paths.insert(normalize_sidecar_path_key(&plan.old_path)) {
+                if seen_sidecar_paths.insert(plan.old_path.clone()) {
                     plans.push(plan);
                 }
             }
@@ -258,63 +258,140 @@ impl ImportAaeCache {
     }
 }
 
-pub(crate) fn apple_aae_sidecar_paths(file_path: &str) -> Vec<PathBuf> {
-    let path = Path::new(file_path);
+// SMB-friendly AAE lookup: enumerate each directory once per batch, and cache
+// directory names briefly for repeated single-image commands. Unlike a direct
+// `parent.join(format!(...))` lookup, this also works on case-sensitive shares.
+type AaeFilenameIndex = HashMap<String, Vec<PathBuf>>;
 
-    let Some(parent) = path.parent() else {
-        return Vec::new();
-    };
-
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-        return Vec::new();
-    };
-
-    let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
-        return Vec::new();
-    };
-
-    let direct_name = format!("{}.aae", stem).to_ascii_lowercase();
-    let full_name = format!("{}.aae", file_name).to_ascii_lowercase();
-
-    let mut paths = Vec::new();
-    let mut seen = HashSet::new();
-
-    let Ok(entries) = fs::read_dir(parent) else {
-        return paths;
-    };
-
-    for entry in entries.flatten() {
-        let sidecar = entry.path();
-
-        // Check extension before querying network file metadata.
-        let Some(ext) = sidecar.extension().and_then(|e| e.to_str()) else {
-            continue;
-        };
-
-        if !ext.eq_ignore_ascii_case("aae") {
+fn scan_aae_filenames(parent: &Path) -> Result<AaeFilenameIndex, String> {
+    let mut found: AaeFilenameIndex = HashMap::new();
+    let entries = fs::read_dir(parent)
+        .map_err(|e| format!("Cannot enumerate AAE directory '{}': {e}", parent.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            format!("Cannot read AAE directory entry '{}': {e}", parent.display())
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !Path::new(name).extension().and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("aae"))
+        {
             continue;
         }
+        // Index real paths, not synthetic lowercased paths.
+        found.entry(name.to_ascii_lowercase()).or_default().push(entry.path());
+    }
+    Ok(found)
+}
 
-        let Some(name) = sidecar.file_name().and_then(|n| n.to_str()) else {
+fn aae_paths_from_index(
+    file_path: &str,
+    filenames: &AaeFilenameIndex,
+) -> Result<Vec<PathBuf>, String> {
+    let image = Path::new(file_path);
+    let Some(stem) = image.file_stem().and_then(|v| v.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let Some(name) = image.file_name().and_then(|v| v.to_str()) else {
+        return Ok(Vec::new());
+    };
+    let mut paths = Vec::new();
+    let mut seen = HashSet::<PathBuf>::new();
+    for candidate in [format!("{stem}.aae"), format!("{name}.aae")] {
+        let Some(matches) = filenames.get(&candidate.to_ascii_lowercase()) else {
             continue;
         };
-
-        let normalized_name = name.to_ascii_lowercase();
-
-        // Only query metadata when the filename matches.
-        if (normalized_name == direct_name || normalized_name == full_name)
-            && sidecar.is_file()
-            && seen.insert(normalize_sidecar_path_key(&sidecar))
-        {
-            paths.push(sidecar);
+        for sidecar in matches {
+            if !seen.insert(sidecar.clone()) { continue; }
+            // Metadata is only requested for relevant candidates, never all
+            // files in a directory. A cached entry might have been moved.
+            match fs::metadata(sidecar) {
+                Ok(metadata) if metadata.is_file() => paths.push(sidecar.clone()),
+                Ok(_) => {},
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(e) => return Err(format!("Cannot inspect AAE '{}': {e}", sidecar.display())),
+            }
         }
     }
+    paths.sort();
+    Ok(paths)
+}
 
-    paths
+/// An index scoped to one batch operation. Each source directory is read once.
+#[derive(Default)]
+pub(crate) struct AaeDirectoryIndex {
+    directories: HashMap<PathBuf, AaeFilenameIndex>,
+}
+
+impl AaeDirectoryIndex {
+    pub(crate) fn paths(&mut self, file_path: &str) -> Result<Vec<PathBuf>, String> {
+        let image = Path::new(file_path);
+        let Some(parent) = image.parent() else { return Ok(Vec::new()); };
+        if !self.directories.contains_key(parent) {
+            self.directories.insert(parent.to_path_buf(), scan_aae_filenames(parent)?);
+        }
+        aae_paths_from_index(file_path, self.directories.get(parent).expect("indexed"))
+    }
+}
+
+/// For repeated individual commands: short-lived and memory-bounded. Actual
+/// matching entries are revalidated on every use. External changes may take
+/// up to three seconds to be discovered; avoid concurrent NAS modifications.
+type SingleAaeCache = HashMap<PathBuf, (std::time::Instant, std::sync::Arc<AaeFilenameIndex>)>;
+static SINGLE_AAE_CACHE: std::sync::OnceLock<std::sync::Mutex<SingleAaeCache>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn invalidate_aae_cache_for_path(path: &Path) {
+    if let (Some(parent), Some(cache)) = (path.parent(), SINGLE_AAE_CACHE.get()) {
+        let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        cache.remove(parent);
+    }
+}
+
+pub(crate) fn apple_aae_sidecar_paths_checked(file_path: &str) -> Result<Vec<PathBuf>, String> {
+    let image = Path::new(file_path);
+    let Some(parent) = image.parent() else { return Ok(Vec::new()); };
+    let cache = SINGLE_AAE_CACHE.get_or_init(
+        || std::sync::Mutex::new(HashMap::new())
+    );
+    let existing = {
+        let guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.get(parent).and_then(|(created, entries)| {
+            (created.elapsed() < std::time::Duration::from_secs(3))
+                .then(|| std::sync::Arc::clone(entries))
+        })
+    };
+    let filenames = if let Some(entries) = existing {
+        entries
+    } else {
+        // Never hold the cache lock during slow SMB directory enumeration.
+        let entries = std::sync::Arc::new(scan_aae_filenames(parent)?);
+        let mut guard = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.retain(|_, (created, _)| {
+            created.elapsed() < std::time::Duration::from_secs(3)
+        });
+        if guard.len() >= 8 { guard.clear(); }
+        guard.insert(parent.to_path_buf(), (std::time::Instant::now(), entries.clone()));
+        entries
+    };
+    aae_paths_from_index(file_path, &filenames)
+}
+
+/// Compatibility helper for callers that only expect a list. Destructive
+/// operations use the Result-returning version so failed SMB enumeration
+/// cannot be mistaken for "no sidecars".
+pub(crate) fn apple_aae_sidecar_paths(file_path: &str) -> Vec<PathBuf> {
+    match apple_aae_sidecar_paths_checked(file_path) {
+        Ok(paths) => paths,
+        Err(error) => {
+            eprintln!("AAE lookup failed: {error}");
+            Vec::new()
+        }
+    }
 }
 
 pub(crate) fn delete_apple_aae_sidecars(file_path: &str, permanently: bool) -> Result<(), String> {
-    for sidecar in apple_aae_sidecar_paths(file_path) {
+    for sidecar in apple_aae_sidecar_paths_checked(file_path)? {
         let sidecar_path = sidecar.to_string_lossy();
         if permanently {
             t_utils::delete_file_permanently(&sidecar_path)?;
@@ -417,7 +494,7 @@ fn resolve_apple_sidecar_transfer_sources(
     for component in component_files {
         if let Some(path) = component.file_path.as_deref() {
             let old_path = PathBuf::from(path);
-            if seen_paths.insert(normalize_sidecar_path_key(&old_path)) {
+            if seen_paths.insert(old_path.clone()) {
                 sources.push(SidecarTransferSource::LivePhoto {
                     old_path,
                     file_id: component.id,
@@ -426,8 +503,8 @@ fn resolve_apple_sidecar_transfer_sources(
         }
     }
 
-    for sidecar in apple_aae_sidecar_paths(file_path) {
-        if seen_paths.insert(normalize_sidecar_path_key(&sidecar)) {
+    for sidecar in apple_aae_sidecar_paths_checked(file_path)? {
+        if seen_paths.insert(sidecar.clone()) {
             sources.push(SidecarTransferSource::AppleAae { old_path: sidecar });
         }
     }
@@ -627,10 +704,6 @@ pub(crate) fn rollback_copied_transfers(transfers: Vec<t_utils::TransferResult>)
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-fn normalize_sidecar_path_key(path: &Path) -> String {
-    path.to_string_lossy().to_ascii_lowercase()
-}
 
 fn build_sidecar_rename_plan(
     old_path: &Path,
