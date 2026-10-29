@@ -260,45 +260,56 @@ impl ImportAaeCache {
 
 pub(crate) fn apple_aae_sidecar_paths(file_path: &str) -> Vec<PathBuf> {
     let path = Path::new(file_path);
+
     let Some(parent) = path.parent() else {
         return Vec::new();
     };
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
         return Vec::new();
     };
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+
+    let Some(file_name) = path.file_name().and_then(|s| s.to_str()) else {
         return Vec::new();
     };
+
     let direct_name = format!("{}.aae", stem).to_ascii_lowercase();
     let full_name = format!("{}.aae", file_name).to_ascii_lowercase();
 
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
+
     let Ok(entries) = fs::read_dir(parent) else {
-        return Vec::new();
+        return paths;
     };
 
     for entry in entries.flatten() {
         let sidecar = entry.path();
-        if !sidecar.is_file() {
-            continue;
-        }
-        let Some(ext) = sidecar.extension().and_then(|ext| ext.to_str()) else {
+
+        // Check extension before querying network file metadata.
+        let Some(ext) = sidecar.extension().and_then(|e| e.to_str()) else {
             continue;
         };
+
         if !ext.eq_ignore_ascii_case("aae") {
             continue;
         }
-        let Some(name) = sidecar.file_name().and_then(|name| name.to_str()) else {
+
+        let Some(name) = sidecar.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
+
         let normalized_name = name.to_ascii_lowercase();
+
+        // Only query metadata when the filename matches.
         if (normalized_name == direct_name || normalized_name == full_name)
+            && sidecar.is_file()
             && seen.insert(normalize_sidecar_path_key(&sidecar))
         {
             paths.push(sidecar);
         }
     }
+
     paths
 }
 
