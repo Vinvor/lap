@@ -4,7 +4,11 @@
       <div v-if="visible" class="fixed inset-0 bg-black/30 z-600">
         <div
           ref="modalDialogRef"
-          class="modal-dialog text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 rounded-box overflow-hidden flex flex-col"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="title"
+          tabindex="-1"
+          class="modal-dialog outline-none text-base-content/70 bg-base-200/80 backdrop-blur-md border border-base-content/30 rounded-box overflow-hidden flex flex-col"
           :style="{ position: 'fixed', top: y + 'px', left: x + 'px', width: width + 'px', ...(height !== undefined && { height: height + 'px' }) }"
         >
         <!-- title bar -->
@@ -35,7 +39,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue';
+import { ref, onMounted, onBeforeUnmount, onUnmounted, nextTick } from 'vue';
 import { IconClose } from '@/common/icons';
 import TButton from '@/components/TButton.vue';
 
@@ -65,6 +69,14 @@ const emit = defineEmits(['cancel']);
 const modalDialogRef = ref<HTMLDivElement | null>(null);
 const visible = ref(false);
 onMounted(() => { visible.value = true; });
+
+let previousFocus: HTMLElement | null = null;
+
+onBeforeUnmount(() => {
+  if (modalDialogRef.value?.contains(document.activeElement) && previousFocus?.isConnected) {
+    previousFocus.focus({ preventScroll: true });
+  }
+});
 
 const x = ref(0);
 const y = ref(0);
@@ -167,8 +179,12 @@ const savePosition = () => {
 };
 
 onMounted(() => {
+  previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   window.addEventListener('resize', clampPosition);
   nextTick(() => {
+    const dialog = modalDialogRef.value;
+    if (!dialog) return;
+    if (!dialog.contains(document.activeElement)) dialog.focus({ preventScroll: true });
     // Restore saved position if available, otherwise center.
     // Either way, clamp to viewport to handle resolution / display changes.
     if (!loadPosition()) {
