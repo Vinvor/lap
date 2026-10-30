@@ -3,7 +3,7 @@
   <!-- Custom Title Bar -->
   <div 
     :class="[
-      'w-full flex items-center justify-between select-none cursor-default',
+      'relative w-full flex items-center justify-between select-none cursor-default',
       viewName==='ImageViewer' ? 'h-12' : 'h-10',
     ]"
     @contextmenu.prevent
@@ -48,6 +48,16 @@
       <slot></slot>
     </div>
 
+    <!-- Always centered on the entire title bar, independently of side controls. -->
+    <div v-if="fileOperationProgress.kind && viewName === 'Home'"
+      class="absolute left-1/2 top-0 h-10 -translate-x-1/2 flex items-center gap-2
+             text-base-content/70 text-nowrap pointer-events-none z-10"
+      role="status" aria-live="polite" data-tauri-drag-region>
+      <span class="loading loading-spinner loading-xs" aria-hidden="true"></span>
+      <span>{{ fileOperationProgress.kind === 'delete' ? 'Deleting' : 'Moving' }}
+        {{ fileOperationProgress.completed }} / {{ fileOperationProgress.total }}</span>
+    </div>
+
     <!-- Window Control Buttons -->
     <div v-if="showDesktopWindowControls" class="h-10 mb-auto flex items-center" @mousedown.stop>
       <IconWinMinus v-if="resizable" 
@@ -74,6 +84,7 @@ import { ref, watch } from 'vue';
 import { emit } from '@tauri-apps/api/event';
 import { getCurrentWindow  } from '@tauri-apps/api/window';
 import { isWin, isMac, isLinux } from '@/common/utils';
+import { fileOperationProgress } from '@/common/fileOperationProgress';
 
 import { 
   IconWinMinus,

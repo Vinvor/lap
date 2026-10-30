@@ -525,6 +525,7 @@ watch(() => [props.gridSize, config.settings.grid.style, isFilmstripView.value],
     return;
   }
 
+  const anchor = captureViewportAnchor();
   const anchorVersion = ++layoutAnchorVersion;
   isLayoutTransitioning.value = true;
   updateColumnCount();
@@ -532,7 +533,8 @@ watch(() => [props.gridSize, config.settings.grid.style, isFilmstripView.value],
   await nextTick();
   if (anchorVersion !== layoutAnchorVersion) return;
 
-  centerItem(props.selectedItemIndex);
+  if (anchor) await restoreViewportAnchor(anchor);
+  else centerItem(props.selectedItemIndex);
 
   if (layoutTransitionTimer) clearTimeout(layoutTransitionTimer);
   layoutTransitionTimer = setTimeout(() => {
@@ -541,16 +543,26 @@ watch(() => [props.gridSize, config.settings.grid.style, isFilmstripView.value],
   }, 500);
 });
 
-watch(() => props.fileList, () => {
+watch(() => props.fileList, async (items, previousItems) => {
+  // Keep a center photo in place when results are inserted, removed or
+  // reordered. Do not carry an anchor into a completely different folder.
+  const anchor = previousItems?.length ? captureViewportAnchor(previousItems) : null;
   updateLayout();
+  if (anchor?.fileId != null && items.some(item => getItemId(item) === anchor.fileId)) {
+    await restoreViewportAnchor(anchor);
+  }
 });
 
-watch(() => props.timelineData, () => {
+watch(() => props.timelineData, async () => {
+  const anchor = captureViewportAnchor();
   updateLayout();
+  await restoreViewportAnchor(anchor);
 });
 
-watch(() => props.layoutVersion, () => {
+watch(() => props.layoutVersion, async () => {
+  const anchor = captureViewportAnchor();
   updateLayout();
+  await restoreViewportAnchor(anchor);
 });
 
 watch(
@@ -589,9 +601,10 @@ watch(() => props.selectedItemIndex, (newValue) => {
 
 onMounted(() => {
   if (containerRef.value) {
-    resizeObserver = new ResizeObserver(() => {
-      // updateColumnCount(); // merged into updateLayout
+    resizeObserver = new ResizeObserver(async () => {
+      const anchor = captureViewportAnchor();
       updateLayout();
+      await restoreViewportAnchor(anchor);
     });
     resizeObserver.observe(containerRef.value);
     updateLayout();
@@ -767,6 +780,115 @@ function scrollToItem(index: number, center = false) {
       [isHorizontal ? 'left' : 'top']: targetScroll,
       behavior: center ? 'auto' : 'smooth'
     });
+  }
+}
+
+
+type ViewportAnchor = {
+  fileId: number | null;
+  index: number;
+  // Distance of the item's top edge from the viewport's vertical midpoint.
+  relativeY: number;
+  oldScrollTop: number;
+};
+
+function itemY(index: number): number {
+  const box = virtualScrollGeometry.value?.[index];
+  return box ? box.y : Math.floor(index / Math.max(1, columnCount.value)) * itemHeight.value;
+}
+
+function getItemId(item: any): number | null {
+  const file = getFileItem(item);
+  const id = Number(file?.id);
+  return file && !file.isPlaceholder && Number.isFinite(id) && id > 0 ? id : null;
+}
+
+function captureViewportAnchor(sourceItems: any[] = renderItems.value): ViewportAnchor | null {
+  const el = scroller.value?.$el as HTMLElement | undefined;
+  if (!el || isFilmstripView.value || sourceItems.length === 0) return null;
+  const center = el.scrollTop + el.clientHeight / 2;
+
+  // Prefer the currently PAINTED thumbnail geometry. This is important when
+  // a reactive grid style or width has already changed but Vue has not yet
+  // repainted the old layout (e.g. on a grid-size slider change).
+  const viewportRect = el.getBoundingClientRect();
+  const midpointY = viewportRect.top + viewportRect.height / 2;
+  const midpointX = viewportRect.left + viewportRect.width / 2;
+  let domIndex = -1;
+  let domDistance = Infinity;
+  let domRelativeY = 0;
+  const renderIndexByFileIndex = new Map<number, number>();
+  sourceItems.forEach((item, index) => {
+    if (getItemId(item) !== null) {
+      renderIndexByFileIndex.set(getFileIndex(item, index), index);
+    }
+  });
+  for (const node of Array.from(el.querySelectorAll<HTMLElement>('[id^="item-"]'))) {
+    const fileIndex = Number(node.id.slice('item-'.length));
+    if (!Number.isInteger(fileIndex) || fileIndex < 0) continue;
+    const renderIndex = renderIndexByFileIndex.get(fileIndex) ?? -1;
+    if (renderIndex < 0) continue;
+    const wrapperRect = (node.parentElement?.parentElement || node).getBoundingClientRect();
+    if (wrapperRect.bottom < viewportRect.top || wrapperRect.top > viewportRect.bottom) continue;
+    const distance = Math.abs((wrapperRect.top + wrapperRect.bottom) / 2 - midpointY)
+      + Math.abs((wrapperRect.left + wrapperRect.right) / 2 - midpointX) * 0.05;
+    if (distance < domDistance) {
+      domDistance = distance;
+      domIndex = renderIndex;
+      domRelativeY = wrapperRect.top - midpointY;
+    }
+  }
+  if (domIndex >= 0) {
+    return {
+      fileId: getItemId(sourceItems[domIndex]),
+      index: domIndex,
+      relativeY: domRelativeY,
+      oldScrollTop: el.scrollTop,
+    };
+  }
+
+  let bestIndex = -1;
+  let bestDistance = Infinity;
+  for (let index = 0; index < sourceItems.length; index++) {
+    if (getItemId(sourceItems[index]) === null) continue;
+    const y = itemY(index);
+    const box = virtualScrollGeometry.value?.[index];
+    const height = box?.height || itemHeight.value;
+    const distance = Math.abs(y + height / 2 - center);
+    if (distance < bestDistance) {
+      bestIndex = index;
+      bestDistance = distance;
+    }
+  }
+  if (bestIndex < 0) return null;
+  return {
+    fileId: getItemId(sourceItems[bestIndex]),
+    index: bestIndex,
+    relativeY: itemY(bestIndex) - center,
+    oldScrollTop: el.scrollTop,
+  };
+}
+
+async function restoreViewportAnchor(anchor: ViewportAnchor | null): Promise<void> {
+  if (!anchor || isFilmstripView.value) return;
+  await nextTick();
+  const el = scroller.value?.$el as HTMLElement | undefined;
+  if (!el || renderItems.value.length === 0) return;
+  let index = anchor.fileId === null ? -1 : renderItems.value.findIndex(
+    item => getItemId(item) === anchor.fileId
+  );
+  // If the exact center file was deleted, keep its former neighborhood at
+  // the same screen location instead of jumping to the start of the library.
+  if (index < 0) {
+    index = Math.min(anchor.index, renderItems.value.length - 1);
+    while (index > 0 && getItemId(renderItems.value[index]) === null) index--;
+  }
+  if (getItemId(renderItems.value[index]) === null) return;
+  const target = itemY(index) - el.clientHeight / 2 - anchor.relativeY;
+  if (Number.isFinite(target)) {
+    const max = Math.max(0, el.scrollHeight - el.clientHeight);
+    const next = Math.min(max, Math.max(0, target));
+    el.scrollTop = next;
   }
 }
 
@@ -993,6 +1115,8 @@ defineExpose({
   scrollToPosition,
   scrollToRowIndex,
   getScrollTop,
+  captureViewportAnchor,
+  restoreViewportAnchor,
   centerItem,
   refreshLayout: updateLayout,
   getNextItemIndex

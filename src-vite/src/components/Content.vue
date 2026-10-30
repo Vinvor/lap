@@ -788,6 +788,7 @@ import { getAlbum, getAllAlbums, recountAlbum, getQueryCountAndSum, getQueryTime
          dedupDelete, getQueryFilePosition, getFolderSearchExcluded,
          listCollections, createCollection, addFilesToCollection, removeFilesFromCollection, getFileCollections, getCollectionCountAndSum, getCollectionFiles, getCollectionGroupedQueryRows, getCollectionGroupFileIds, getCollectionQueryFileIds, fetchFolder, isDirectoryAccessible, checkAlbumAccessibility, addTagToFile, saveXmpMetadata } from '@/common/api';
 import { config, libConfig } from '@/common/config';
+import { startFileOperation, advanceFileOperation, finishFileOperation } from '@/common/fileOperationProgress';
 import { createThumbnailScheduler } from '@/common/thumbnailScheduler';
 import {
   gridSizeFromPosition,
@@ -2143,6 +2144,25 @@ const fileConflictDialog = ref({
 let fileConflictResolver: ((result: { policy: FileConflictPolicy; applyAll: boolean }) => void) | null = null;
 const showTrashMsgbox = ref(false);
 const isTrashDeleting = ref(false);
+const confirmedDeleteCount = ref(0);
+let activeDeleteProgressToken: number | null = null;
+let unlistenBatchDeleteProgress: (() => void) | null = null;
+
+// A single shared Rust progress event handles all files in one batch without
+// breaking batch-wide AAE directory indexing into repeated scans.
+onMounted(() => {
+  void listen<{ completed: number; total: number }>('lap-batch-delete-progress', event => {
+    if (activeDeleteProgressToken !== null) {
+      advanceFileOperation(activeDeleteProgressToken, Number(event.payload.completed || 0));
+    }
+  }).then(unlisten => {
+    unlistenBatchDeleteProgress = unlisten;
+  }).catch(error => console.error('Failed to listen for batch delete progress:', error));
+});
+onBeforeUnmount(() => {
+  unlistenBatchDeleteProgress?.();
+  if (activeDeleteProgressToken !== null) finishFileOperation(activeDeleteProgressToken);
+});
 const showTrashFailedMsgbox = ref(false);
 const showExternalOpenWarningMsgbox = ref(false);
 const showExternalAppsDialog = ref(false);
@@ -2418,6 +2438,9 @@ const openTrashMsgbox = (reclaimBytes = 0, groupKey = '', fileIds: number[] = []
   dedupTrashGroupKey.value = groupKey || '';
   dedupDeleteFileIds.value = Array.isArray(fileIds) ? [...new Set(fileIds)] : [];
   deletePermanently.value = permanentDeleteChecked.value;
+  confirmedDeleteCount.value = dedupDeleteFileIds.value.length > 0
+    ? dedupDeleteFileIds.value.length
+    : (selectMode.value ? selectedCount.value : 1);
   showTrashMsgbox.value = true;
 };
 
@@ -2425,6 +2448,7 @@ const openAllDuplicatesTrashMsgbox = (fileCount: number, reclaimBytes: number) =
   if (fileCount <= 0) return;
   dedupReclaimBytes.value = Math.max(0, reclaimBytes);
   dedupBulkFileCount.value = fileCount;
+  confirmedDeleteCount.value = fileCount;
   dedupTrashGroupKey.value = 'all';
   dedupDeleteFileIds.value = [];
   deletePermanently.value = false;
@@ -2466,9 +2490,7 @@ const trashMsgboxOkText = computed(() => {
 });
 
 const trashMsgboxMessage = computed(() => {
-  const deleteCount = isDedupBulkTrash.value
-    ? dedupBulkFileCount.value
-    : (isDedupTrash.value ? dedupDeleteFileIds.value.length : selectedCount.value);
+  const deleteCount = confirmedDeleteCount.value;
   const base = isDedupBulkTrash.value
     ? t(
         deletePermanently.value
@@ -3291,12 +3313,17 @@ async function clearContentInternalDrag(event?: PointerEvent) {
       let indexFailureCount = 0;
       let transferFailureCount = 0;
       let applyAllPolicy: FileConflictPolicy | null = null;
+      const droppedViewportAnchor = gridViewRef.value?.captureViewportAnchor?.() ?? null;
+      const dragMoveProgressToken = copy ? null : startFileOperation('move', files.length);
+      let processedDroppedFiles = 0;
       const affectedAlbumIds = new Set<number>([albumId]);
       const affectedFolderPaths = new Set<string>([destPath]);
-      await withFileTransferBatch(async (batchId: number) => {
-        for (const file of files) {
-          if (!copy && file.folder_id === selected.id) continue;
-          const conflict = await resolveConflictPolicy(
+      try {
+        await withFileTransferBatch(async (batchId: number) => {
+          for (const file of files) {
+            try {
+              if (!copy && file.folder_id === selected.id) continue;
+              const conflict = await resolveConflictPolicy(
             file.file_path,
             getFolderName(file.file_path),
             destPath,
@@ -3327,8 +3354,16 @@ async function clearContentInternalDrag(event?: PointerEvent) {
               transferFailureCount++;
             }
           }
+          } finally {
+              if (dragMoveProgressToken !== null) {
+              advanceFileOperation(dragMoveProgressToken, ++processedDroppedFiles);
+            }
+          }
         }
       });
+      } finally {
+        if (dragMoveProgressToken !== null) finishFileOperation(dragMoveProgressToken);
+      }
       if (done > 0) {
         await refreshFolderSidebarCounts([...affectedFolderPaths]);
         await refreshAffectedAlbums(Array.from(affectedAlbumIds));
@@ -3347,6 +3382,10 @@ async function clearContentInternalDrag(event?: PointerEvent) {
             : t('toolbar.filter.select_count', { count: files.length.toLocaleString() }),
           dest: getFolderName(destPath) || destPath,
         }));
+      }
+      if (!copy) {
+        await nextTick();
+        await gridViewRef.value?.restoreViewportAnchor?.(droppedViewportAnchor);
       }
     }
   }
@@ -5518,11 +5557,17 @@ function queueScanStreamingPull(albumId: number, current: number) {
 
 function restoreScrollAfterRefresh() {
   const scrollTop = pendingRestoreScrollTop.value;
-  if (scrollTop === null) return;
-  nextTick(() => {
+  const anchor = pendingCenterViewportAnchor;
+  if (scrollTop === null && !anchor) return;
+  nextTick(async () => {
     if (gridViewRef.value) {
-      gridViewRef.value.scrollToPosition(scrollTop);
+      if (anchor) {
+        await gridViewRef.value.restoreViewportAnchor(anchor);
+      } else if (scrollTop !== null) {
+        gridViewRef.value.scrollToPosition(scrollTop);
+      }
     }
+    pendingCenterViewportAnchor = null;
     pendingRestoreScrollTop.value = null;
   });
 }
@@ -7866,8 +7911,16 @@ async function getUnifiedSearchFileList(searchText: string, requestId: number) {
 }
 
 let contentUpdateSeq = 0;
+let pendingCenterViewportAnchor: any | null = null;
 
 async function updateContent(force = false, preserveMultiSelection = selectMode.value) {
+  // Preserve the exact center photo when a refresh only changes the same list.
+  if (force && fileList.value.length > 0) {
+    pendingCenterViewportAnchor =
+      gridViewRef.value?.captureViewportAnchor?.() ?? pendingCenterViewportAnchor;
+  } else if (!force) {
+    pendingCenterViewportAnchor = null;
+  }
   const updateSeq = ++contentUpdateSeq;
   const newIndex = config.main.sidebarIndex;
   const nextAlbumId = newIndex === SIDEBAR.ALBUM ? Number(libConfig.album.id || 0) : 0;
@@ -8730,14 +8783,15 @@ function rebuildSelectionAfterListMutation(selectedIds: Set<number>) {
   syncSelectionVersions();
 
   if (remainingCount === 0) {
-    selectMode.value = false;
     lastSelectedIndex.value = -1;
     keyboardSelectionAnchorIndex.value = -1;
+    // Keep the selection panel and current grid width stable after a deletion.
   }
 }
 
 const onMoveTo = async () => {
   if (!await requireCurrentOriginals()) return;
+  const viewportAnchor = gridViewRef.value?.captureViewportAnchor?.() ?? null;
   const affectedAlbumIds = new Set<number>();
   const affectedFolderPaths = new Set<string>();
   const destPath = String(libConfig.destFolder.folderPath || '');
@@ -8763,14 +8817,25 @@ const onMoveTo = async () => {
     const items = await getActionableSelectedItemsForAction();
     if (!items) return;
     if (!await confirmLargeBatch(items.length)) return;
-    const moves = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
-      items,
-      item => getTransferDestinationKey(item),
-      async item => {
-        const movedFile = await moveFile(item.id, item.file_path, destFolderId, destPath, 'keep_both', batchId);
-        return { item, movedFile };
-      },
-    ));
+    const moveProgressToken = startFileOperation('move', items.length);
+    let completedMoves = 0;
+    let moves: PromiseSettledResult<{ item: any; movedFile: any }>[];
+    try {
+      moves = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
+        items,
+        item => getTransferDestinationKey(item),
+        async item => {
+          try {
+            const movedFile = await moveFile(item.id, item.file_path, destFolderId, destPath, 'keep_both', batchId);
+            return { item, movedFile };
+          } finally {
+            advanceFileOperation(moveProgressToken, ++completedMoves);
+          }
+        },
+      ));
+    } finally {
+      finishFileOperation(moveProgressToken);
+    }
     const successfulMoves = moves.flatMap(result =>
       result.status === 'fulfilled' && result.value.movedFile ? [result.value] : [],
     );
@@ -8805,7 +8870,14 @@ const onMoveTo = async () => {
   else if(selectedItemIndex.value >= 0) {               // single select mode
     const file = fileList.value[selectedItemIndex.value];
     const sourceLabel = file.name;
-    const movedFile = await moveFile(file.id, file.file_path, destFolderId, destPath);
+    const moveProgressToken = startFileOperation('move', 1);
+    let movedFile;
+    try {
+      movedFile = await moveFile(file.id, file.file_path, destFolderId, destPath);
+      advanceFileOperation(moveProgressToken, 1);
+    } finally {
+      finishFileOperation(moveProgressToken);
+    }
     if(movedFile) {
       affectedFolderPaths.add(getFolderPath(file.file_path));
       console.log('onMoveTo:', movedFile);
@@ -8832,6 +8904,8 @@ const onMoveTo = async () => {
   }
 
   showMoveTo.value = false;
+  await nextTick();
+  await gridViewRef.value?.restoreViewportAnchor?.(viewportAnchor);
 }
 
 const selectSystemDestination = async (title: string) => {
@@ -8908,6 +8982,7 @@ const resolveLibraryDestination = async (destPath: string) => {
 
 const onMoveToFolder = async () => {
   if (!await requireCurrentOriginals()) return;
+  const viewportAnchor = gridViewRef.value?.captureViewportAnchor?.() ?? null;
   const files = await getFilesForFolderAction();
   if (!files || files.length === 0) return;
 
@@ -8949,17 +9024,28 @@ const onMoveToFolder = async () => {
     if (conflict.policy === 'skip') continue;
     operations.push({ file, policy: conflict.policy });
   }
-  const moveResults = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
-    operations,
-    ({ file }) => getTransferDestinationKey(file),
-    async ({ file, policy }) => {
-      const movedFile = libraryDestination
-        ? await moveFile(file.id, file.file_path, libraryDestination.folderId, destPath, policy, batchId)
-        : await moveFileOutsideLibrary(file.id, file.file_path, destPath, policy, batchId);
-      if (!movedFile) throw new Error(`Failed to move ${file.file_path}`);
-      return { file, movedFile };
-    },
-  ));
+  const moveProgressToken = startFileOperation('move', operations.length || 1);
+  let completedMoves = 0;
+  let moveResults: PromiseSettledResult<{ file: any; movedFile: any }>[];
+  try {
+    moveResults = await withFileTransferBatch(async (batchId: number) => runWithKeyedConcurrency(
+      operations,
+      ({ file }) => getTransferDestinationKey(file),
+      async ({ file, policy }) => {
+        try {
+          const movedFile = libraryDestination
+            ? await moveFile(file.id, file.file_path, libraryDestination.folderId, destPath, policy, batchId)
+            : await moveFileOutsideLibrary(file.id, file.file_path, destPath, policy, batchId);
+          if (!movedFile) throw new Error(`Failed to move ${file.file_path}`);
+          return { file, movedFile };
+        } finally {
+          advanceFileOperation(moveProgressToken, ++completedMoves);
+        }
+      },
+    ));
+  } finally {
+    finishFileOperation(moveProgressToken);
+  }
   const successfulMoves = moveResults.flatMap(result =>
     result.status === 'fulfilled' ? [result.value] : [],
   );
@@ -9002,6 +9088,8 @@ const onMoveToFolder = async () => {
   if (moveResults.some(result => result.status === 'rejected')) {
     toast.error(t('msgbox.move_to_folder.error', { source: sourceLabel, dest: getFolderName(destPath) || destPath }));
   }
+  await nextTick();
+  await gridViewRef.value?.restoreViewportAnchor?.(viewportAnchor);
 }
 
 const onCopyToFolder = async () => {
@@ -9153,18 +9241,27 @@ const onTrashAllDuplicates = async () => {
 const handleTrashMsgboxOk = async () => {
   if (isTrashDeleting.value) return;
   isTrashDeleting.value = true;
+  // Close immediately. Keeping the dialog mounted while selectedCount updates
+  // is what previously caused it to show '0 files' until manually dismissed.
+  showTrashMsgbox.value = false;
+  const token = startFileOperation('delete', confirmedDeleteCount.value || 1);
+  activeDeleteProgressToken = token;
   try {
     if (isDedupBulkTrash.value) {
       await onTrashAllDuplicates();
     } else {
       await onTrashFile();
     }
+    advanceFileOperation(token, confirmedDeleteCount.value || 1);
   } finally {
+    if (activeDeleteProgressToken === token) activeDeleteProgressToken = null;
+    finishFileOperation(token);
     isTrashDeleting.value = false;
   }
 };
 
 const onTrashFile = async (retryItemsOverride: any[] = []) => {
+  const viewportAnchor = gridViewRef.value?.captureViewportAnchor?.() ?? null;
   permanentDeleteChecked.value = deletePermanently.value;
   const permanently = deletePermanently.value;
   const deletedFileIds: number[] = [];
@@ -9437,6 +9534,9 @@ const onTrashFile = async (retryItemsOverride: any[] = []) => {
         ? getDeleteFilesErrorMessage(permanently)
         : getDeleteFileErrorMessage(permanently)
     );
+  } finally {
+    await nextTick();
+    await gridViewRef.value?.restoreViewportAnchor?.(viewportAnchor);
   }
 }
 
@@ -10147,12 +10247,8 @@ const invertSelectionInCurrentList = async () => {
 const handleSelectMode = (value: any) => {
   if (isScanStreamingMode.value) return;
   selectMode.value = value;
-  if(!selectMode.value) {
-    clearLoadedSelectionFlags();
-    resetSelectionSummary();
-    groupSelectedCountMap.value = {};
-    groupSelectedSizeMap.value = {};
-  } else {
+  if (selectMode.value) {
+    // Reopening selection mode must not discard existing selected photo IDs.
     showQuickView.value = false;
     stopSlideShow();
   }
