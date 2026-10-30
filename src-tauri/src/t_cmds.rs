@@ -2541,8 +2541,11 @@ pub struct BatchDeleteResult {
 pub async fn batch_delete_files(
     files: Vec<BatchDeleteFile>,
     permanently: bool,
+    app: AppHandle,
 ) -> Result<BatchDeleteResult, String> {
-    tauri::async_runtime::spawn_blocking(move || delete_files_grouped(files, permanently))
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_files_grouped_with_progress(files, permanently, Some(&app))
+    })
         .await
         .map_err(|e| format!("Failed to run batch delete: {}", e))?
 }
@@ -2552,6 +2555,14 @@ pub async fn batch_delete_files(
 pub(crate) fn delete_files_grouped(
     files: Vec<BatchDeleteFile>,
     permanently: bool,
+) -> Result<BatchDeleteResult, String> {
+    delete_files_grouped_with_progress(files, permanently, None)
+}
+
+fn delete_files_grouped_with_progress(
+    files: Vec<BatchDeleteFile>,
+    permanently: bool,
+    app: Option<&AppHandle>,
 ) -> Result<BatchDeleteResult, String> {
     struct DeleteGroup {
         primary_id: i64,
@@ -2606,7 +2617,16 @@ pub(crate) fn delete_files_grouped(
     let mut failed_count = 0usize;
     let mut sidecar_warning_count = 0usize;
     let mut trash_failed_file_ids = Vec::new();
-    for group in &delete_groups {
+    let progress_total = delete_groups.len();
+    for (group_index, group) in delete_groups.iter().enumerate() {
+        let report = |app: Option<&AppHandle>| {
+            if let Some(app) = app {
+                let _ = app.emit("lap-batch-delete-progress", serde_json::json!({
+                    "completed": group_index + 1,
+                    "total": progress_total,
+                }));
+            }
+        };
         let result = if permanently {
             t_utils::delete_file_permanently(&group.primary_path)
         } else {
@@ -2617,6 +2637,7 @@ pub(crate) fn delete_files_grouped(
             if !permanently {
                 trash_failed_file_ids.push(group.primary_id);
             }
+            report(app);
             continue;
         }
         deleted_file_ids.push(group.primary_id);
@@ -2653,6 +2674,7 @@ pub(crate) fn delete_files_grouped(
         if group_failed {
             sidecar_warning_count += 1;
         }
+        report(app);
     }
 
     // Never touch the XMP of an image whose physical deletion failed.
